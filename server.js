@@ -7,62 +7,64 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// football-data.org competition IDs
 const LEAGUE_IDS = {
-  epl: 39,
-  laliga: 140,
-  bundesliga: 78,
-  seriea: 135,
-  ligue1: 61,
+  epl: "PL",
+  laliga: "PD",
+  bundesliga: "BL1",
+  seriea: "SA",
+  ligue1: "FL1",
 };
 
 app.get("/fixtures/:leagueId", async (req, res) => {
   const leagueId = LEAGUE_IDS[req.params.leagueId];
   if (!leagueId) return res.status(400).json({ error: "Invalid league" });
 
-  const apiKey = process.env.FOOTBALL_API_KEY;
-
   try {
-    // April 2026 = still 2025/26 season, so season=2025
-    // Try upcoming first, then fall back to last played
-    const urls = [
-      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&status=NS&next=10`,
-      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&status=NS&from=2026-04-01&to=2026-06-30`,
-      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&last=10`,
-    ];
+    const today = new Date();
+    const from = today.toISOString().split("T")[0];
+    const to = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
-    let fixtures = [];
-
-    for (const url of urls) {
-      const response = await fetch(url, {
+    const response = await fetch(
+      `https://api.football-data.org/v4/competitions/${leagueId}/matches?status=SCHEDULED&dateFrom=${from}&dateTo=${to}`,
+      {
         headers: {
-          "x-apisports-key": apiKey,
-          "x-rapidapi-key": apiKey,
-          "x-rapidapi-host": "v3.football.api-sports.io",
+          "X-Auth-Token": process.env.FOOTBALL_API_KEY,
         },
-      });
-      const data = await response.json();
-
-      // Log for debugging
-      console.log(`URL: ${url}`);
-      console.log(`Results: ${data.results}, Errors:`, data.errors);
-
-      if (data.response && data.response.length > 0) {
-        fixtures = data.response.map((f) => ({
-          id: f.fixture.id,
-          home: f.teams.home.name,
-          away: f.teams.away.name,
-          date: f.fixture.date,
-          venue: f.fixture.venue?.name || "",
-          round: f.league?.round || "",
-          finished: f.fixture.status?.short === "FT",
-        }));
-        break;
       }
+    );
+
+    const data = await response.json();
+
+    if (!data.matches || data.matches.length === 0) {
+      // fallback: get next 10 matches regardless of date
+      const fallback = await fetch(
+        `https://api.football-data.org/v4/competitions/${leagueId}/matches?status=SCHEDULED`,
+        { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
+      );
+      const fallbackData = await fallback.json();
+      const matches = (fallbackData.matches || []).slice(0, 10).map((m) => ({
+        id: m.id,
+        home: m.homeTeam.name,
+        away: m.awayTeam.name,
+        date: m.utcDate,
+        venue: "",
+        round: m.matchday ? `Matchday ${m.matchday}` : "",
+      }));
+      return res.json(matches);
     }
+
+    const fixtures = data.matches.slice(0, 10).map((m) => ({
+      id: m.id,
+      home: m.homeTeam.name,
+      away: m.awayTeam.name,
+      date: m.utcDate,
+      venue: "",
+      round: m.matchday ? `Matchday ${m.matchday}` : "",
+    }));
 
     res.json(fixtures);
   } catch (err) {
-    console.error("Fixture fetch error:", err);
     res.status(500).json({ error: "Failed to fetch fixtures: " + err.message });
   }
 });
@@ -115,19 +117,14 @@ Return this exact structure:
   }
 });
 
-// Debug endpoint - test the football API key directly
 app.get("/test", async (req, res) => {
   try {
     const response = await fetch(
-      "https://v3.football.api-sports.io/fixtures?league=39&season=2025&status=NS&next=5",
-      {
-        headers: {
-          "x-apisports-key": process.env.FOOTBALL_API_KEY,
-        },
-      }
+      "https://api.football-data.org/v4/competitions/PL/matches?status=SCHEDULED",
+      { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
     );
     const data = await response.json();
-    res.json({ results: data.results, errors: data.errors, sample: data.response?.slice(0, 2) });
+    res.json({ count: data.matches?.length, sample: data.matches?.slice(0, 2), error: data.error });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
