@@ -19,24 +19,51 @@ app.get("/fixtures/:leagueId", async (req, res) => {
   const leagueId = LEAGUE_IDS[req.params.leagueId];
   if (!leagueId) return res.status(400).json({ error: "Invalid league" });
 
-  const today = new Date();
-  const season = today.getFullYear();
-
   try {
-    const response = await fetch(
-      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=${season}&status=NS&next=10`,
-      { headers: { "x-apisports-key": process.env.FOOTBALL_API_KEY } }
-    );
-    const data = await response.json();
-    if (!data.response || data.response.length === 0) return res.json([]);
+    // First try current year season with next 10 fixtures
+    const trySeasons = [2025, 2026, 2024];
+    let fixtures = [];
 
-    const fixtures = data.response.map((f) => ({
-      id: f.fixture.id,
-      home: f.teams.home.name,
-      away: f.teams.away.name,
-      date: f.fixture.date,
-      venue: f.fixture.venue?.name || "",
-    }));
+    for (const season of trySeasons) {
+      const response = await fetch(
+        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=${season}&status=NS&next=10`,
+        { headers: { "x-apisports-key": process.env.FOOTBALL_API_KEY } }
+      );
+      const data = await response.json();
+
+      if (data.response && data.response.length > 0) {
+        fixtures = data.response.map((f) => ({
+          id: f.fixture.id,
+          home: f.teams.home.name,
+          away: f.teams.away.name,
+          date: f.fixture.date,
+          venue: f.fixture.venue?.name || "",
+          round: f.league.round || "",
+        }));
+        break;
+      }
+    }
+
+    // If still nothing, get last 10 played matches as fallback
+    if (fixtures.length === 0) {
+      const response = await fetch(
+        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&status=FT&last=10`,
+        { headers: { "x-apisports-key": process.env.FOOTBALL_API_KEY } }
+      );
+      const data = await response.json();
+      if (data.response && data.response.length > 0) {
+        fixtures = data.response.map((f) => ({
+          id: f.fixture.id,
+          home: f.teams.home.name,
+          away: f.teams.away.name,
+          date: f.fixture.date,
+          venue: f.fixture.venue?.name || "",
+          round: f.league.round || "",
+          finished: true,
+        }));
+      }
+    }
+
     res.json(fixtures);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch fixtures: " + err.message });
