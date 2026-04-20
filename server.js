@@ -58,21 +58,28 @@ app.get("/fixtures/:leagueId", async (req, res) => {
   }
 });
 
-// Fetch last 5 results for a team
+// Fetch last 5 results for a team across ALL competitions
 async function getTeamForm(teamId) {
   try {
     const response = await fetch(
-      `https://api.football-data.org/v4/teams/${teamId}/matches?status=FINISHED&limit=5`,
+      `https://api.football-data.org/v4/teams/${teamId}/matches?status=FINISHED&limit=20`,
       { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
     );
     const data = await response.json();
     if (!data.matches) return null;
 
-    return data.matches.slice(-5).map((m) => {
+    // Sort by date descending and take last 5 across all competitions
+    const sorted = data.matches
+      .filter(m => m.score && m.score.fullTime && m.score.fullTime.home !== null)
+      .sort((a, b) => new Date(b.utcDate) - new Date(a.utcDate))
+      .slice(0, 5);
+
+    return sorted.map((m) => {
       const isHome = m.homeTeam.id === teamId;
       const teamScore = isHome ? m.score.fullTime.home : m.score.fullTime.away;
       const oppScore = isHome ? m.score.fullTime.away : m.score.fullTime.home;
       const opponent = isHome ? m.awayTeam.name : m.homeTeam.name;
+      const competition = m.competition?.name || "";
       let result = "D";
       if (teamScore > oppScore) result = "W";
       if (teamScore < oppScore) result = "L";
@@ -81,7 +88,8 @@ async function getTeamForm(teamId) {
         score: `${teamScore}-${oppScore}`,
         opponent,
         venue: isHome ? "H" : "A",
-        label: `${result} ${teamScore}-${oppScore} vs ${opponent} (${isHome ? "H" : "A"})`,
+        competition,
+        label: `${result} ${teamScore}-${oppScore} vs ${opponent} (${isHome ? "H" : "A"}) - ${competition}`,
       };
     });
   } catch (err) {
@@ -89,36 +97,29 @@ async function getTeamForm(teamId) {
   }
 }
 
-// Fetch head to head
+// Fetch head to head using correct endpoint
 async function getH2H(homeId, awayId) {
   try {
     const response = await fetch(
-      `https://api.football-data.org/v4/matches?homeTeam=${homeId}&awayTeam=${awayId}&limit=5&status=FINISHED`,
+      `https://api.football-data.org/v4/teams/${homeId}/matches?status=FINISHED&limit=20`,
       { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
     );
     const data = await response.json();
-    if (!data.matches || data.matches.length === 0) {
-      // Try reverse
-      const response2 = await fetch(
-        `https://api.football-data.org/v4/matches?homeTeam=${awayId}&awayTeam=${homeId}&limit=5&status=FINISHED`,
-        { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
-      );
-      const data2 = await response2.json();
-      return (data2.matches || []).slice(-5).map((m) => ({
-        home: m.homeTeam.name,
-        away: m.awayTeam.name,
-        homeScore: m.score.fullTime.home,
-        awayScore: m.score.fullTime.away,
-        date: m.utcDate,
-      }));
-    }
-    return (data.matches || []).slice(-5).map((m) => ({
+    if (!data.matches) return null;
+
+    // Filter only matches between these two teams
+    const h2h = data.matches.filter(m =>
+      (m.homeTeam.id === homeId && m.awayTeam.id === awayId) ||
+      (m.homeTeam.id === awayId && m.awayTeam.id === homeId)
+    ).slice(-5).map(m => ({
       home: m.homeTeam.name,
       away: m.awayTeam.name,
       homeScore: m.score.fullTime.home,
       awayScore: m.score.fullTime.away,
       date: m.utcDate,
     }));
+
+    return h2h;
   } catch (err) {
     return null;
   }
