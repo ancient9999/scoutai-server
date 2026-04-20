@@ -58,28 +58,21 @@ app.get("/fixtures/:leagueId", async (req, res) => {
   }
 });
 
-// Fetch last 5 results for a team across ALL competitions
+// Fetch last 5 results for a team across all available competitions
 async function getTeamForm(teamId) {
   try {
     const response = await fetch(
-      `https://api.football-data.org/v4/teams/${teamId}/matches?status=FINISHED&limit=20`,
+      `https://api.football-data.org/v4/teams/${teamId}/matches?status=FINISHED&limit=10`,
       { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
     );
     const data = await response.json();
     if (!data.matches) return null;
 
-    // Sort by date descending and take last 5 across all competitions
-    const sorted = data.matches
-      .filter(m => m.score && m.score.fullTime && m.score.fullTime.home !== null)
-      .sort((a, b) => new Date(b.utcDate) - new Date(a.utcDate))
-      .slice(0, 5);
-
-    return sorted.map((m) => {
+    return data.matches.slice(-5).map((m) => {
       const isHome = m.homeTeam.id === teamId;
       const teamScore = isHome ? m.score.fullTime.home : m.score.fullTime.away;
       const oppScore = isHome ? m.score.fullTime.away : m.score.fullTime.home;
       const opponent = isHome ? m.awayTeam.name : m.homeTeam.name;
-      const competition = m.competition?.name || "";
       let result = "D";
       if (teamScore > oppScore) result = "W";
       if (teamScore < oppScore) result = "L";
@@ -88,8 +81,7 @@ async function getTeamForm(teamId) {
         score: `${teamScore}-${oppScore}`,
         opponent,
         venue: isHome ? "H" : "A",
-        competition,
-        label: `${result} ${teamScore}-${oppScore} vs ${opponent} (${isHome ? "H" : "A"}) - ${competition}`,
+        label: `${result} ${teamScore}-${oppScore} vs ${opponent} (${isHome ? "H" : "A"})`,
       };
     });
   } catch (err) {
@@ -97,7 +89,7 @@ async function getTeamForm(teamId) {
   }
 }
 
-// Fetch head to head using correct endpoint
+// Fetch H2H
 async function getH2H(homeId, awayId) {
   try {
     const response = await fetch(
@@ -107,7 +99,6 @@ async function getH2H(homeId, awayId) {
     const data = await response.json();
     if (!data.matches) return null;
 
-    // Filter only matches between these two teams
     const h2h = data.matches.filter(m =>
       (m.homeTeam.id === homeId && m.awayTeam.id === awayId) ||
       (m.homeTeam.id === awayId && m.awayTeam.id === homeId)
@@ -125,7 +116,7 @@ async function getH2H(homeId, awayId) {
   }
 }
 
-// Fetch league standing for a team
+// Fetch league standing
 async function getTeamStanding(leagueCode, teamId) {
   try {
     const response = await fetch(
@@ -154,11 +145,8 @@ async function getTeamStanding(leagueCode, teamId) {
   }
 }
 
-// AI prediction with real data
-app.post("/predict", async (req, res) => {
-  const { home, away, homeId, awayId, leagueId } = req.body;
-  if (!home || !away) return res.status(400).json({ error: "Home and away teams are required." });
-
+// Core prediction function
+async function makePrediction(home, away, homeId, awayId, leagueId) {
   let homeForm = null, awayForm = null, homeStanding = null, awayStanding = null, h2h = null;
 
   if (homeId && awayId) {
@@ -181,18 +169,17 @@ app.post("/predict", async (req, res) => {
 
   const hasRealData = context.length > 0;
 
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1000,
-        system: `You are an expert football analyst. Use the real data provided as the PRIMARY basis for your prediction.
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1000,
+      system: `You are an expert football analyst. Use the real data provided as the PRIMARY basis for your prediction.
 Always respond with ONLY valid JSON, no markdown, no extra text.
 Return this exact structure:
 {
@@ -202,36 +189,101 @@ Return this exact structure:
   "over25_confidence": <number 0-100>,
   "btts": true | false,
   "btts_confidence": <number 0-100>,
+  "score": "<predicted score e.g. 2-1>",
   "reasoning": "<2-3 sentence analysis based on the real data provided>"
 }`,
-        messages: [{
-          role: "user",
-          content: `Predict: ${home} (HOME) vs ${away} (AWAY).${hasRealData ? `\n\nReal data:${context}\n\nBase prediction on this data.` : ""}`,
-        }],
-      }),
-    });
+      messages: [{
+        role: "user",
+        content: `Predict: ${home} (HOME) vs ${away} (AWAY).${hasRealData ? `\n\nReal data:${context}\n\nBase prediction on this data.` : ""}`,
+      }],
+    }),
+  });
 
-    const data = await response.json();
-    if (data.error) return res.status(500).json({ error: data.error.message });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
 
-    const text = data.content?.map((c) => c.text || "").join("") || "";
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
+  const text = data.content?.map((c) => c.text || "").join("") || "";
+  const clean = text.replace(/```json|```/g, "").trim();
+  const parsed = JSON.parse(clean);
 
-    parsed.dataSource = hasRealData ? "live" : "historical";
-    parsed.homeForm = homeForm;
-    parsed.awayForm = awayForm;
-    parsed.homeStanding = homeStanding;
-    parsed.awayStanding = awayStanding;
-    parsed.h2h = h2h;
+  parsed.dataSource = hasRealData ? "live" : "historical";
+  parsed.homeForm = homeForm;
+  parsed.awayForm = awayForm;
+  parsed.homeStanding = homeStanding;
+  parsed.awayStanding = awayStanding;
+  parsed.h2h = h2h;
 
-    res.json(parsed);
+  return parsed;
+}
+
+// Regular prediction endpoint
+app.post("/predict", async (req, res) => {
+  const { home, away, homeId, awayId, leagueId } = req.body;
+  if (!home || !away) return res.status(400).json({ error: "Home and away teams are required." });
+
+  try {
+    const result = await makePrediction(home, away, homeId, awayId, leagueId);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Prediction failed. " + err.message });
   }
 });
 
-// Save prediction result for accuracy tracking
+// Prediction of the day - highest confidence match across all leagues
+app.get("/prediction-of-day", async (req, res) => {
+  try {
+    const today = new Date();
+    const from = today.toISOString().split("T")[0];
+    const to = new Date(today.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+    // Fetch fixtures from all leagues
+    const allFixtures = [];
+    for (const [leagueId, leagueCode] of Object.entries(LEAGUE_IDS)) {
+      try {
+        const response = await fetch(
+          `https://api.football-data.org/v4/competitions/${leagueCode}/matches?status=SCHEDULED&dateFrom=${from}&dateTo=${to}`,
+          { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
+        );
+        const data = await response.json();
+        if (data.matches && data.matches.length > 0) {
+          const fixture = data.matches[0];
+          allFixtures.push({
+            leagueId,
+            leagueName: { epl: "Premier League", laliga: "La Liga", bundesliga: "Bundesliga", seriea: "Serie A", ligue1: "Ligue 1" }[leagueId],
+            id: fixture.id,
+            homeId: fixture.homeTeam.id,
+            awayId: fixture.awayTeam.id,
+            home: fixture.homeTeam.name,
+            away: fixture.awayTeam.name,
+            date: fixture.utcDate,
+          });
+        }
+      } catch (e) {}
+    }
+
+    if (allFixtures.length === 0) return res.json(null);
+
+    // Get predictions for all fixtures and find highest confidence
+    const predictions = await Promise.all(
+      allFixtures.map(async (f) => {
+        try {
+          const pred = await makePrediction(f.home, f.away, f.homeId, f.awayId, f.leagueId);
+          return { ...f, prediction: pred };
+        } catch (e) {
+          return null;
+        }
+      })
+    );
+
+    const valid = predictions.filter(Boolean);
+    const best = valid.sort((a, b) => b.prediction.result_confidence - a.prediction.result_confidence)[0];
+    res.json(best);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Accuracy tracking
 const predictionResults = {};
 
 app.post("/result", (req, res) => {
