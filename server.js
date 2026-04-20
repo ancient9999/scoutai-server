@@ -19,17 +19,32 @@ app.get("/fixtures/:leagueId", async (req, res) => {
   const leagueId = LEAGUE_IDS[req.params.leagueId];
   if (!leagueId) return res.status(400).json({ error: "Invalid league" });
 
+  const apiKey = process.env.FOOTBALL_API_KEY;
+
   try {
-    // First try current year season with next 10 fixtures
-    const trySeasons = [2025, 2026, 2024];
+    // April 2026 = still 2025/26 season, so season=2025
+    // Try upcoming first, then fall back to last played
+    const urls = [
+      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&status=NS&next=10`,
+      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&status=NS&from=2026-04-01&to=2026-06-30`,
+      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&last=10`,
+    ];
+
     let fixtures = [];
 
-    for (const season of trySeasons) {
-      const response = await fetch(
-        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=${season}&status=NS&next=10`,
-        { headers: { "x-apisports-key": process.env.FOOTBALL_API_KEY } }
-      );
+    for (const url of urls) {
+      const response = await fetch(url, {
+        headers: {
+          "x-apisports-key": apiKey,
+          "x-rapidapi-key": apiKey,
+          "x-rapidapi-host": "v3.football.api-sports.io",
+        },
+      });
       const data = await response.json();
+
+      // Log for debugging
+      console.log(`URL: ${url}`);
+      console.log(`Results: ${data.results}, Errors:`, data.errors);
 
       if (data.response && data.response.length > 0) {
         fixtures = data.response.map((f) => ({
@@ -38,34 +53,16 @@ app.get("/fixtures/:leagueId", async (req, res) => {
           away: f.teams.away.name,
           date: f.fixture.date,
           venue: f.fixture.venue?.name || "",
-          round: f.league.round || "",
+          round: f.league?.round || "",
+          finished: f.fixture.status?.short === "FT",
         }));
         break;
       }
     }
 
-    // If still nothing, get last 10 played matches as fallback
-    if (fixtures.length === 0) {
-      const response = await fetch(
-        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&status=FT&last=10`,
-        { headers: { "x-apisports-key": process.env.FOOTBALL_API_KEY } }
-      );
-      const data = await response.json();
-      if (data.response && data.response.length > 0) {
-        fixtures = data.response.map((f) => ({
-          id: f.fixture.id,
-          home: f.teams.home.name,
-          away: f.teams.away.name,
-          date: f.fixture.date,
-          venue: f.fixture.venue?.name || "",
-          round: f.league.round || "",
-          finished: true,
-        }));
-      }
-    }
-
     res.json(fixtures);
   } catch (err) {
+    console.error("Fixture fetch error:", err);
     res.status(500).json({ error: "Failed to fetch fixtures: " + err.message });
   }
 });
@@ -115,6 +112,24 @@ Return this exact structure:
     res.json(parsed);
   } catch (err) {
     res.status(500).json({ error: "Prediction failed. " + err.message });
+  }
+});
+
+// Debug endpoint - test the football API key directly
+app.get("/test", async (req, res) => {
+  try {
+    const response = await fetch(
+      "https://v3.football.api-sports.io/fixtures?league=39&season=2025&status=NS&next=5",
+      {
+        headers: {
+          "x-apisports-key": process.env.FOOTBALL_API_KEY,
+        },
+      }
+    );
+    const data = await response.json();
+    res.json({ results: data.results, errors: data.errors, sample: data.response?.slice(0, 2) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
