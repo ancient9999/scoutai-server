@@ -31,26 +31,17 @@ app.get("/fixtures/:leagueId", async (req, res) => {
     );
     const data = await response.json();
 
-    if (!data.matches || data.matches.length === 0) {
+    let matches = data.matches || [];
+    if (matches.length === 0) {
       const fallback = await fetch(
         `https://api.football-data.org/v4/competitions/${leagueId}/matches?status=SCHEDULED`,
         { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
       );
       const fallbackData = await fallback.json();
-      const matches = (fallbackData.matches || []).slice(0, 10).map((m) => ({
-        id: m.id,
-        homeId: m.homeTeam.id,
-        awayId: m.awayTeam.id,
-        home: m.homeTeam.name,
-        away: m.awayTeam.name,
-        date: m.utcDate,
-        venue: "",
-        round: m.matchday ? `Matchday ${m.matchday}` : "",
-      }));
-      return res.json(matches);
+      matches = fallbackData.matches || [];
     }
 
-    const fixtures = data.matches.slice(0, 10).map((m) => ({
+    const fixtures = matches.slice(0, 10).map((m) => ({
       id: m.id,
       homeId: m.homeTeam.id,
       awayId: m.awayTeam.id,
@@ -77,7 +68,7 @@ async function getTeamForm(teamId) {
     const data = await response.json();
     if (!data.matches) return null;
 
-    const results = data.matches.slice(-5).map((m) => {
+    return data.matches.slice(-5).map((m) => {
       const isHome = m.homeTeam.id === teamId;
       const teamScore = isHome ? m.score.fullTime.home : m.score.fullTime.away;
       const oppScore = isHome ? m.score.fullTime.away : m.score.fullTime.home;
@@ -85,10 +76,49 @@ async function getTeamForm(teamId) {
       let result = "D";
       if (teamScore > oppScore) result = "W";
       if (teamScore < oppScore) result = "L";
-      return `${result} ${teamScore}-${oppScore} vs ${opponent} (${isHome ? "H" : "A"})`;
+      return {
+        result,
+        score: `${teamScore}-${oppScore}`,
+        opponent,
+        venue: isHome ? "H" : "A",
+        label: `${result} ${teamScore}-${oppScore} vs ${opponent} (${isHome ? "H" : "A"})`,
+      };
     });
+  } catch (err) {
+    return null;
+  }
+}
 
-    return results;
+// Fetch head to head
+async function getH2H(homeId, awayId) {
+  try {
+    const response = await fetch(
+      `https://api.football-data.org/v4/matches?homeTeam=${homeId}&awayTeam=${awayId}&limit=5&status=FINISHED`,
+      { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
+    );
+    const data = await response.json();
+    if (!data.matches || data.matches.length === 0) {
+      // Try reverse
+      const response2 = await fetch(
+        `https://api.football-data.org/v4/matches?homeTeam=${awayId}&awayTeam=${homeId}&limit=5&status=FINISHED`,
+        { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
+      );
+      const data2 = await response2.json();
+      return (data2.matches || []).slice(-5).map((m) => ({
+        home: m.homeTeam.name,
+        away: m.awayTeam.name,
+        homeScore: m.score.fullTime.home,
+        awayScore: m.score.fullTime.away,
+        date: m.utcDate,
+      }));
+    }
+    return (data.matches || []).slice(-5).map((m) => ({
+      home: m.homeTeam.name,
+      away: m.awayTeam.name,
+      homeScore: m.score.fullTime.home,
+      awayScore: m.score.fullTime.away,
+      date: m.utcDate,
+    }));
   } catch (err) {
     return null;
   }
@@ -128,34 +158,25 @@ app.post("/predict", async (req, res) => {
   const { home, away, homeId, awayId, leagueId } = req.body;
   if (!home || !away) return res.status(400).json({ error: "Home and away teams are required." });
 
-  // Fetch real data in parallel
-  let homeForm = null, awayForm = null, homeStanding = null, awayStanding = null;
+  let homeForm = null, awayForm = null, homeStanding = null, awayStanding = null, h2h = null;
 
   if (homeId && awayId) {
     const leagueCode = LEAGUE_IDS[leagueId] || "PL";
-    [homeForm, awayForm, homeStanding, awayStanding] = await Promise.all([
+    [homeForm, awayForm, homeStanding, awayStanding, h2h] = await Promise.all([
       getTeamForm(homeId),
       getTeamForm(awayId),
       getTeamStanding(leagueCode, homeId),
       getTeamStanding(leagueCode, awayId),
+      getH2H(homeId, awayId),
     ]);
   }
 
-  // Build context string from real data
   let context = "";
-
-  if (homeForm) {
-    context += `\n${home} last 5 results: ${homeForm.join(", ")}`;
-  }
-  if (awayForm) {
-    context += `\n${away} last 5 results: ${awayForm.join(", ")}`;
-  }
-  if (homeStanding) {
-    context += `\n${home} league position: ${homeStanding.position}th, ${homeStanding.points} pts, W${homeStanding.won} D${homeStanding.draw} L${homeStanding.lost}, GF${homeStanding.gf} GA${homeStanding.ga}`;
-  }
-  if (awayStanding) {
-    context += `\n${away} league position: ${awayStanding.position}th, ${awayStanding.points} pts, W${awayStanding.won} D${awayStanding.draw} L${awayStanding.lost}, GF${awayStanding.gf} GA${awayStanding.ga}`;
-  }
+  if (homeForm) context += `\n${home} last 5 results: ${homeForm.map(f => f.label).join(", ")}`;
+  if (awayForm) context += `\n${away} last 5 results: ${awayForm.map(f => f.label).join(", ")}`;
+  if (homeStanding) context += `\n${home} standing: ${homeStanding.position}th, ${homeStanding.points} pts, W${homeStanding.won} D${homeStanding.draw} L${homeStanding.lost}, GF${homeStanding.gf} GA${homeStanding.ga}`;
+  if (awayStanding) context += `\n${away} standing: ${awayStanding.position}th, ${awayStanding.points} pts, W${awayStanding.won} D${awayStanding.draw} L${awayStanding.lost}, GF${awayStanding.gf} GA${awayStanding.ga}`;
+  if (h2h && h2h.length > 0) context += `\nHead to head (last ${h2h.length}): ${h2h.map(m => `${m.home} ${m.homeScore}-${m.awayScore} ${m.away}`).join(", ")}`;
 
   const hasRealData = context.length > 0;
 
@@ -170,7 +191,8 @@ app.post("/predict", async (req, res) => {
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1000,
-        system: `You are an expert football analyst. You will be given real up-to-date match data including recent results, league standings, and form. Use this data as the PRIMARY basis for your prediction. Always respond with ONLY valid JSON, no markdown, no extra text.
+        system: `You are an expert football analyst. Use the real data provided as the PRIMARY basis for your prediction.
+Always respond with ONLY valid JSON, no markdown, no extra text.
 Return this exact structure:
 {
   "result": "Home Win" | "Draw" | "Away Win",
@@ -181,13 +203,10 @@ Return this exact structure:
   "btts_confidence": <number 0-100>,
   "reasoning": "<2-3 sentence analysis based on the real data provided>"
 }`,
-        messages: [
-          {
-            role: "user",
-            content: `Predict the match: ${home} (HOME) vs ${away} (AWAY).
-${hasRealData ? `\nHere is the latest real data for both teams:${context}\n\nBase your prediction primarily on this real data.` : "Use your knowledge of these teams to make the best prediction possible."}`,
-          },
-        ],
+        messages: [{
+          role: "user",
+          content: `Predict: ${home} (HOME) vs ${away} (AWAY).${hasRealData ? `\n\nReal data:${context}\n\nBase prediction on this data.` : ""}`,
+        }],
       }),
     });
 
@@ -198,12 +217,34 @@ ${hasRealData ? `\nHere is the latest real data for both teams:${context}\n\nBas
     const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean);
 
-    // Include data source info
     parsed.dataSource = hasRealData ? "live" : "historical";
+    parsed.homeForm = homeForm;
+    parsed.awayForm = awayForm;
+    parsed.homeStanding = homeStanding;
+    parsed.awayStanding = awayStanding;
+    parsed.h2h = h2h;
+
     res.json(parsed);
   } catch (err) {
     res.status(500).json({ error: "Prediction failed. " + err.message });
   }
+});
+
+// Save prediction result for accuracy tracking
+const predictionResults = {};
+
+app.post("/result", (req, res) => {
+  const { key, predicted, actual } = req.body;
+  if (!key || !predicted || !actual) return res.status(400).json({ error: "Missing fields" });
+  predictionResults[key] = { predicted, actual, correct: predicted === actual, timestamp: Date.now() };
+  res.json({ success: true });
+});
+
+app.get("/accuracy", (req, res) => {
+  const results = Object.values(predictionResults);
+  const total = results.length;
+  const correct = results.filter(r => r.correct).length;
+  res.json({ total, correct, accuracy: total > 0 ? Math.round((correct / total) * 100) : null });
 });
 
 app.get("/test", async (req, res) => {
@@ -213,7 +254,7 @@ app.get("/test", async (req, res) => {
       { headers: { "X-Auth-Token": process.env.FOOTBALL_API_KEY } }
     );
     const data = await response.json();
-    res.json({ count: data.matches?.length, sample: data.matches?.slice(0, 2), error: data.error });
+    res.json({ count: data.matches?.length, sample: data.matches?.slice(0, 2) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
