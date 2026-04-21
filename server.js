@@ -246,7 +246,7 @@ async function runPrediction(home,away,homeId,awayId,compId,sport="football") {
       system:isBball
         ?`Expert NBA analyst. Respond ONLY valid JSON: {"result":"Home Win"|"Away Win","result_confidence":<0-100>,"over_under":"Over"|"Under","line":<number>,"over_under_confidence":<0-100>,"score":"<e.g.112-108>","reasoning":"<2-3 sentences>"}`
         :`Expert football analyst. Use data as PRIMARY basis. Respond ONLY valid JSON: {"result":"Home Win"|"Draw"|"Away Win","result_confidence":<0-100>,"over25":true|false,"over25_confidence":<0-100>,"btts":true|false,"btts_confidence":<0-100>,"score":"<e.g.2-1>","reasoning":"<2-3 sentences>"}`,
-      messages:[{role:"user",content:`Predict: ${home} (HOME) vs ${away} (AWAY).${ctx?`\n\nData:${ctx}`:""}`}]
+      messages:[{role:"user",content:`Predict: ${home} (HOME) vs ${away} (AWAY).`+(ctx?"\n\nData:"+ctx:"")}]
     })
   });
   const d = await r.json();
@@ -502,10 +502,26 @@ app.get("/cron/daily", async (req,res) => {
     const subs = SUPABASE_ENABLED ? (await supabase.from("subscribers").select("email")).data : memSubs;
     if (subs?.length&&results.potd&&process.env.RESEND_API_KEY) {
       const potd=results.potd;
-      const html=`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:20px;"><div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:16px;padding:24px;text-align:center;margin-bottom:24px;"><h1 style="color:#fff;margin:0;">⚽ Scout<span style="color:#22c55e;">AI</span></h1><p style="color:#64748b;font-size:12px;letter-spacing:2px;margin:4px 0 0;">DAILY PREDICTIONS</p></div><h2 style="color:#ea580c;">🔥 Today\'s Best Pick</h2><div style="background:#fff7ed;border-radius:12px;padding:18px;border:1px solid #fed7aa;"><p style="color:#94a3b8;font-size:12px;margin:0 0 6px;">${potd.compName?.toUpperCase()||""}</p><h3 style="margin:0 0 8px;">${potd.home} vs ${potd.away}</h3><div style="display:inline-block;padding:6px 16px;border-radius:20px;background:#ea580c15;border:1.5px solid #ea580c30;color:#ea580c;font-weight:bold;">${potd.prediction?.result||""}</div><p style="color:#64748b;font-size:13px;margin:8px 0 0;">${potd.prediction?.result_confidence||0}% confidence${potd.prediction?.score?` · Score: ${potd.prediction.score}`:""}</p>${potd.prediction?.reasoning?`<p style="color:#475569;font-size:13px;margin:10px 0 0;">${potd.prediction.reasoning}</p>`:""}</div><div style="text-align:center;margin-top:20px;"><a href="${process.env.SITE_URL||"https://scoutaibot.com"}" style="background:#22c55e;color:#0f172a;padding:12px 24px;border-radius:8px;font-weight:bold;text-decoration:none;">View All Predictions →</a></div><p style="color:#94a3b8;font-size:11px;text-align:center;margin-top:16px;">⚠ For entertainment only. Not financial advice. 18+ Gamble responsibly.</p></body></html>`;
+      const html = "<!DOCTYPE html><html><body style='font-family:sans-serif;max-width:560px;margin:0 auto;padding:20px;'>" +
+        "<div style='background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:16px;padding:24px;text-align:center;margin-bottom:24px;'>" +
+        "<h1 style='color:#fff;margin:0;'>ScoutAI</h1>" +
+        "<p style='color:#64748b;font-size:12px;letter-spacing:2px;margin:4px 0 0;'>DAILY PREDICTIONS</p></div>" +
+        "<h2 style='color:#ea580c;'>Today's Best Pick</h2>" +
+        "<div style='background:#fff7ed;border-radius:12px;padding:18px;border:1px solid #fed7aa;'>" +
+        "<p style='color:#94a3b8;font-size:12px;margin:0 0 6px;'>" + (potd.compName||"") + "</p>" +
+        "<h3 style='margin:0 0 8px;'>" + potd.home + " vs " + potd.away + "</h3>" +
+        "<div style='display:inline-block;padding:6px 16px;border-radius:20px;background:#fff;border:1.5px solid #ea580c;color:#ea580c;font-weight:bold;margin-bottom:8px;'>" + (potd.prediction?.result||"") + "</div>" +
+        "<p style='color:#64748b;font-size:13px;margin:8px 0 0;'>" + (potd.prediction?.result_confidence||0) + "% confidence" + (potd.prediction?.score ? " · Score: " + potd.prediction.score : "") + "</p>" +
+        (potd.prediction?.reasoning ? "<p style='color:#475569;font-size:13px;margin:10px 0 0;'>" + potd.prediction.reasoning + "</p>" : "") +
+        "</div>" +
+        "<div style='text-align:center;margin-top:20px;'>" +
+        "<a href='" + (process.env.SITE_URL||"https://scoutaibot.com") + "' style='background:#22c55e;color:#0f172a;padding:12px 24px;border-radius:8px;font-weight:bold;text-decoration:none;'>View All Predictions</a>" +
+        "</div>" +
+        "<p style='color:#94a3b8;font-size:11px;text-align:center;margin-top:16px;'>For entertainment only. Not financial advice. 18+ Gamble responsibly.</p>" +
+        "</body></html>"
       let sent=0;
       for (const sub of subs) {
-        try { await resend.emails.send({from:"ScoutAI Daily Picks <onboarding@resend.dev>",to:sub.email,subject:`🔥 Today\'s Best Bet: ${potd.home} vs ${potd.away}`,html}); sent++; } catch {}
+        try { await resend.emails.send({from:"ScoutAI Daily Picks <onboarding@resend.dev>",to:sub.email,subject:`🔥 Today's Best Bet: ${potd.home} vs ${potd.away}`,html}); sent++; } catch {}
       }
       results.emailsSent=sent;
     }
