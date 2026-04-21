@@ -204,7 +204,7 @@ async function getForm(teamId) {
       const ts=h?m.score.fullTime.home:m.score.fullTime.away;
       const os=h?m.score.fullTime.away:m.score.fullTime.home;
       const res=ts>os?"W":ts<os?"L":"D";
-      return {result:res,score:`${ts}-${os}`,opponent:h?m.awayTeam.name:m.homeTeam.name,venue:h?"H":"A",label:`${res} ${ts}-${os} vs ${h?m.awayTeam.name:m.homeTeam.name}`};
+      return {result:res,score:ts+"-"+os,opponent:h?m.awayTeam.name:m.homeTeam.name,venue:h?"H":"A",label:res+" "+ts+"-"+os+" vs "+(h?m.awayTeam.name:m.homeTeam.name)};
     });
   } catch { return null; }
 }
@@ -235,7 +235,7 @@ async function runPrediction(home,away,homeId,awayId,compId,sport="football") {
     if (awayForm) ctx+=`\n${away} last 5: ${awayForm.map(f=>f.label).join(", ")}`;
     if (homeStand) ctx+=`\n${home}: ${homeStand.position}th, ${homeStand.points}pts W${homeStand.won}D${homeStand.draw}L${homeStand.lost}`;
     if (awayStand) ctx+=`\n${away}: ${awayStand.position}th, ${awayStand.points}pts W${awayStand.won}D${awayStand.draw}L${awayStand.lost}`;
-    if (h2h?.length) ctx+=`\nH2H: ${h2h.map(m=>`${m.home} ${m.homeScore}-${m.awayScore} ${m.away}`).join(", ")}`;
+    if (h2h?.length) ctx+="\nH2H: "+h2h.map(m=>m.home+" "+m.homeScore+"-"+m.awayScore+" "+m.away).join(", ");
   }
   const isBball=sport==="basketball";
   const r = await fetch("https://api.anthropic.com/v1/messages",{
@@ -700,14 +700,21 @@ app.post("/predict/sport", async (req,res) => {
   const {home,away,sport,league} = req.body;
   if (!home||!away) return res.status(400).json({error:"Teams required"});
   try {
+    const systemMap = {
+      tennis: "You are an expert tennis analyst. Respond ONLY with valid JSON: {"result":"Player 1 Win or Player 2 Win","result_confidence":<0-100>,"score":"<e.g. 6-4 6-3>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}",
+      nfl: "You are an expert NFL analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win","result_confidence":<0-100>,"score":"<e.g. 24-17>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}",
+      nhl: "You are an expert NHL analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win","result_confidence":<0-100>,"score":"<e.g. 3-2>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}",
+      rugby: "You are an expert rugby analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win or Draw","result_confidence":<0-100>,"score":"<e.g. 24-18>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}",
+    };
+    const systemPrompt = systemMap[sport] || "You are an expert sports analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win or Draw","result_confidence":<0-100>,"score":"<predicted score>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}";
+    const userMsg = "Predict this " + sport + " match: " + home + " vs " + away + (league ? " in " + league : "");
     const r = await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
       body:JSON.stringify({
-        model:"claude-sonnet-4-6",max_tokens:1000,
-        system:`You are an expert ${sport} analyst. Always respond with ONLY valid JSON:
-{"result":"${sport==="tennis"?"Player 1 Win"|"Player 2 Win":"Home Win"|"Away Win"|"${sport==="nfl"||sport==="nba"?"":"Draw"}"}","result_confidence":<0-100>,"score":"<predicted score>","key_factors":["<factor1>","<factor2>","<factor3>"],"reasoning":"<2-3 sentences>"}`,
-        messages:[{role:"user",content:`Predict this ${sport} match: ${home} vs ${away}${league?` in ${league}`:""}`}]
+        model:"claude-sonnet-4-6", max_tokens:1000,
+        system: systemPrompt,
+        messages:[{role:"user",content:userMsg}]
       })
     });
     const d = await r.json();
@@ -716,6 +723,7 @@ app.post("/predict/sport", async (req,res) => {
     res.json(JSON.parse(text.replace(/```json|```/g,"").trim()));
   } catch(e){ res.status(500).json({error:e.message}); }
 });
+
 
 app.get("/", (req,res) => res.send("ScoutAI Server v3.0 ✅"));
 app.listen(PORT,()=>console.log(`ScoutAI v3.0 on port ${PORT}`));
