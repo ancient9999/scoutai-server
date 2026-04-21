@@ -10,10 +10,12 @@ app.use(express.json());
 
 // ── CLIENTS ────────────────────────────────────────────────────────────────
 const resend = new Resend(process.env.RESEND_API_KEY);
-const supabase = createClient(
-  process.env.SUPABASE_URL || "",
-  process.env.SUPABASE_SERVICE_KEY || ""
-);
+// Supabase is optional - falls back to memory if not configured
+const SUPABASE_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
+const supabase = SUPABASE_ENABLED
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  : null;
+console.log(`Supabase: ${SUPABASE_ENABLED ? "✅ connected" : "⚠️ not configured (using memory)"}`);
 
 const FKEY = () => ({ "X-Auth-Token": process.env.FOOTBALL_API_KEY });
 const BKEY = () => ({ "Authorization": process.env.BDL_API_KEY });
@@ -240,7 +242,7 @@ async function runPrediction(home,away,homeId,awayId,compId,sport="football") {
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
     body:JSON.stringify({
-      model:"claude-haiku-4-5-20251001",max_tokens:1000,
+      model:"claude-sonnet-4-6",max_tokens:1000,
       system:isBball
         ?`Expert NBA analyst. Respond ONLY valid JSON: {"result":"Home Win"|"Away Win","result_confidence":<0-100>,"over_under":"Over"|"Under","line":<number>,"over_under_confidence":<0-100>,"score":"<e.g.112-108>","reasoning":"<2-3 sentences>"}`
         :`Expert football analyst. Use data as PRIMARY basis. Respond ONLY valid JSON: {"result":"Home Win"|"Draw"|"Away Win","result_confidence":<0-100>,"over25":true|false,"over25_confidence":<0-100>,"btts":true|false,"btts_confidence":<0-100>,"score":"<e.g.2-1>","reasoning":"<2-3 sentences>"}`,
@@ -264,15 +266,23 @@ app.post("/predict", async (req,res) => {
 });
 
 // ── PREDICTION STORAGE (Supabase) ───────────────────────────────────────────
+// In-memory fallback store
+const memPredictions = [];
 app.post("/predictions/store", async (req,res) => {
   const {key,home,away,compId,matchId,result,score,confidence,date,sport}=req.body;
   if (!key||!home||!away) return res.status(400).json({error:"Missing fields"});
   try {
-    const {error}=await supabase.from("predictions").upsert({
-      key,home,away,comp_id:compId,match_id:matchId||null,
-      result,score,confidence,date,sport:sport||"football",status:"pending"
-    },{onConflict:"key",ignoreDuplicates:true});
-    if (error) throw error;
+    if (SUPABASE_ENABLED) {
+      const {error}=await supabase.from("predictions").upsert({
+        key,home,away,comp_id:compId,match_id:matchId||null,
+        result,score,confidence,date,sport:sport||"football",status:"pending"
+      },{onConflict:"key",ignoreDuplicates:true});
+      if (error) throw error;
+    } else {
+      if (!memPredictions.find(p=>p.key===key)) {
+        memPredictions.push({key,home,away,comp_id:compId,match_id:matchId||null,result,score,confidence,date,sport:sport||"football",status:"pending",created_at:new Date().toISOString()});
+      }
+    }
     res.json({success:true});
   } catch(e){ res.status(500).json({error:e.message}); }
 });
@@ -280,24 +290,52 @@ app.post("/predictions/store", async (req,res) => {
 // ── PERFORMANCE (from Supabase) ─────────────────────────────────────────────
 app.get("/performance", async (req,res) => {
   try {
-    const [{data:summary},{data:recent}]=await Promise.all([
-      supabase.from("performance_summary").select("*").single(),
-      supabase.from("predictions").select("home,away,result,actual_result,status,confidence,date,sport").neq("status","pending").order("created_at",{ascending:false}).limit(20)
-    ]);
-    res.json({
-      total:summary?.total||0,resolved:summary?.resolved||0,
-      won:summary?.won||0,lost:summary?.lost||0,
-      accuracyAll:summary?.accuracy_all||null,
-      accuracy7d:summary?.accuracy_7d||null,
-      accuracy30d:summary?.accuracy_30d||null,
-      recentResults:(recent||[]).map(p=>({home:p.home,away:p.away,predicted:p.result,actual:p.actual_result,status:p.status,confidence:p.confidence,date:p.date,sport:p.sport}))
-    });
+    let total,resolved,won,lost,accuracyAll,accuracy7d,accuracy30d,recentResults;
+    if (SUPABASE_ENABLED) {
+      const [{data:summary},{data:recent}]=await Promise.all([
+        supabase.from("performance_summary").select("*").single(),
+        supabase.from("predictions").select("home,away,result,actual_result,status,confidence,date,sport").neq("status","pending").order("created_at",{ascending:false}).limit(20)
+      ]);
+      total=summary?.total||0; resolved=summary?.resolved||0;
+      won=summary?.won||0; lost=summary?.lost||0;
+      accuracyAll=summary?.accuracy_all||null;
+      accuracy7d=summary?.accuracy_7d||null; accuracy30d=summary?.accuracy_30d||null;
+      recentResults=(recent||[]).map(p=>({home:p.home,away:p.away,predicted:p.result,actual:p.actual_result,status:p.status,confidence:p.confidence,date:p.date,sport:p.sport}));
+    } else {
+      const all = memPredictions;
+      const resolved_ = all.filter(p=>p.status!=="pending");
+      const won_ = resolved_.filter(p=>p.status==="won");
+      total=all.length; resolved=resolved_.length; won=won_.length; lost=resolved_.length-won_.length;
+      accuracyAll=resolved_.length?Math.round(won_.length/resolved_.length*100):null;
+      accuracy7d=null; accuracy30d=null;
+      recentResults=resolved_.slice(-20).reverse().map(p=>({home:p.home,away:p.away,predicted:p.result,actual:p.actual_result||null,status:p.status,confidence:p.confidence,date:p.date,sport:p.sport}));
+    }
+    res.json({total,resolved,won,lost,accuracyAll,accuracy7d,accuracy30d,recentResults});
   } catch(e){ res.status(500).json({error:e.message}); }
 });
 
 // ── AUTO CHECK RESULTS ──────────────────────────────────────────────────────
 async function checkPendingResults() {
   try {
+    if (!SUPABASE_ENABLED) {
+      // Memory fallback
+      const pending = memPredictions.filter(p=>p.status==="pending"&&p.sport==="football"&&p.match_id);
+      for (const pred of pending) {
+        try {
+          const matchDate=new Date(pred.date);
+          if (Date.now()-matchDate.getTime()<2*60*60*1000) continue;
+          const r=await fetch(`https://api.football-data.org/v4/matches/${pred.match_id}`,{headers:FKEY()});
+          const m=await r.json();
+          if (m.status!=="FINISHED") continue;
+          const hs=m.score?.fullTime?.home; const as2=m.score?.fullTime?.away;
+          if (hs===null||hs===undefined) continue;
+          const actual=hs>as2?"Home Win":as2>hs?"Away Win":"Draw";
+          pred.status=pred.result===actual?"won":"lost";
+          pred.actual_result=actual; pred.actual_score=`${hs}-${as2}`;
+        } catch {}
+      }
+      return;
+    }
     const {data:pending}=await supabase.from("predictions").select("*").eq("status","pending").eq("sport","football").not("match_id","is",null);
     if (!pending?.length) return;
     for (const pred of pending) {
@@ -375,17 +413,19 @@ app.get("/parlays", async (req,res) => {
 });
 
 // ── SEO BLOG AUTO-GENERATOR ─────────────────────────────────────────────────
+const memBlog = [];
 app.post("/blog/generate", async (req,res) => {
   const {home,away,compName,date,prediction}=req.body;
   if (!home||!away) return res.status(400).json({error:"Missing match data"});
   const slug=`${home.toLowerCase().replace(/[^a-z0-9]+/g,"-")}-vs-${away.toLowerCase().replace(/[^a-z0-9]+/g,"-")}-prediction-${new Date(date||Date.now()).toISOString().split("T")[0]}`;
+  if (!SUPABASE_ENABLED) return res.json({success:false,message:"Blog requires Supabase"});
   try {
     const existing=await supabase.from("blog_posts").select("slug").eq("slug",slug).single();
     if (existing.data) return res.json({success:true,slug,existing:true});
     const r=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
       body:JSON.stringify({
-        model:"claude-haiku-4-5-20251001",max_tokens:1500,
+        model:"claude-sonnet-4-6",max_tokens:1500,
         system:"You are an SEO football prediction writer. Write engaging, 300-400 word match preview articles optimized for Google search. Include the teams' names naturally. Do NOT use markdown headers. Write in plain paragraphs.",
         messages:[{role:"user",content:`Write an SEO-optimized match prediction article for: ${home} vs ${away} (${compName||"Football"}) on ${new Date(date||Date.now()).toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}. Our AI prediction: ${prediction?.result||"Home Win"} with ${prediction?.result_confidence||70}% confidence. Predicted score: ${prediction?.score||"unknown"}. Include search-friendly content about both teams, likely outcome, and why this prediction was made. End with a call to action to check scoutaibot.com for more predictions.`}]
       })
@@ -399,6 +439,7 @@ app.post("/blog/generate", async (req,res) => {
 });
 
 app.get("/blog", async (req,res) => {
+  if (!SUPABASE_ENABLED) return res.json([]);
   try {
     const {data}=await supabase.from("blog_posts").select("slug,title,home,away,match_date,created_at").eq("published",true).order("created_at",{ascending:false}).limit(20);
     res.json(data||[]);
@@ -406,6 +447,7 @@ app.get("/blog", async (req,res) => {
 });
 
 app.get("/blog/:slug", async (req,res) => {
+  if (!SUPABASE_ENABLED) return res.status(404).json({error:"Blog not available yet"});
   try {
     const {data}=await supabase.from("blog_posts").select("*").eq("slug",req.params.slug).single();
     if (!data) return res.status(404).json({error:"Post not found"});
@@ -429,12 +471,17 @@ app.post("/contact", async (req,res) => {
 });
 
 // ── NEWSLETTER ──────────────────────────────────────────────────────────────
+const memSubs = [];
 app.post("/subscribe", async (req,res) => {
   const {email}=req.body;
   if (!email) return res.status(400).json({error:"Email required"});
   try {
-    const {error}=await supabase.from("subscribers").upsert({email},{onConflict:"email",ignoreDuplicates:true});
-    if (error) throw error;
+    if (SUPABASE_ENABLED) {
+      const {error}=await supabase.from("subscribers").upsert({email},{onConflict:"email",ignoreDuplicates:true});
+      if (error) throw error;
+    } else {
+      if (!memSubs.find(s=>s.email===email)) memSubs.push({email,created_at:new Date().toISOString()});
+    }
     try { await resend.emails.send({from:"ScoutAI <onboarding@resend.dev>",to:process.env.OWNER_EMAIL||"owner@example.com",subject:"New ScoutAI Subscriber",html:`<p>New subscriber: <b>${email}</b></p>`}); } catch {}
     res.json({success:true,message:"Subscribed! Daily predictions coming your way."});
   } catch(e){ res.status(500).json({error:e.message}); }
@@ -452,7 +499,7 @@ app.get("/cron/daily", async (req,res) => {
   } catch(e){ results.errors.push("POTD: "+e.message); }
   // Email subscribers
   try {
-    const {data:subs}=await supabase.from("subscribers").select("email");
+    const subs = SUPABASE_ENABLED ? (await supabase.from("subscribers").select("email")).data : memSubs;
     if (subs?.length&&results.potd&&process.env.RESEND_API_KEY) {
       const potd=results.potd;
       const html=`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:20px;"><div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:16px;padding:24px;text-align:center;margin-bottom:24px;"><h1 style="color:#fff;margin:0;">⚽ Scout<span style="color:#22c55e;">AI</span></h1><p style="color:#64748b;font-size:12px;letter-spacing:2px;margin:4px 0 0;">DAILY PREDICTIONS</p></div><h2 style="color:#ea580c;">🔥 Today\'s Best Pick</h2><div style="background:#fff7ed;border-radius:12px;padding:18px;border:1px solid #fed7aa;"><p style="color:#94a3b8;font-size:12px;margin:0 0 6px;">${potd.compName?.toUpperCase()||""}</p><h3 style="margin:0 0 8px;">${potd.home} vs ${potd.away}</h3><div style="display:inline-block;padding:6px 16px;border-radius:20px;background:#ea580c15;border:1.5px solid #ea580c30;color:#ea580c;font-weight:bold;">${potd.prediction?.result||""}</div><p style="color:#64748b;font-size:13px;margin:8px 0 0;">${potd.prediction?.result_confidence||0}% confidence${potd.prediction?.score?` · Score: ${potd.prediction.score}`:""}</p>${potd.prediction?.reasoning?`<p style="color:#475569;font-size:13px;margin:10px 0 0;">${potd.prediction.reasoning}</p>`:""}</div><div style="text-align:center;margin-top:20px;"><a href="${process.env.SITE_URL||"https://scoutaibot.com"}" style="background:#22c55e;color:#0f172a;padding:12px 24px;border-radius:8px;font-weight:bold;text-decoration:none;">View All Predictions →</a></div><p style="color:#94a3b8;font-size:11px;text-align:center;margin-top:16px;">⚠ For entertainment only. Not financial advice. 18+ Gamble responsibly.</p></body></html>`;
@@ -464,6 +511,194 @@ app.get("/cron/daily", async (req,res) => {
     }
   } catch(e){ results.errors.push("Emails: "+e.message); }
   res.json({success:true,timestamp:new Date().toISOString(),...results});
+});
+
+
+// ── ESPN UNOFFICIAL API (NFL, NHL, Tennis, Rugby) ──────────────────────────
+const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
+
+// NFL
+app.get("/nfl/games", async (req,res) => {
+  try {
+    const r = await fetch(`${ESPN}/football/nfl/scoreboard`);
+    const d = await r.json();
+    const events = (d.events||[]).map(e => ({
+      id: e.id,
+      name: e.name,
+      date: e.date,
+      status: e.status?.type?.description||"scheduled",
+      completed: e.status?.type?.completed||false,
+      home: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.team?.displayName||"",
+      away: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.team?.displayName||"",
+      homeLogo: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.team?.logo||"",
+      awayLogo: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.team?.logo||"",
+      homeScore: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.score||"",
+      awayScore: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.score||"",
+      venue: e.competitions?.[0]?.venue?.fullName||"",
+    }));
+    res.json(events);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+app.get("/nfl/standings", async (req,res) => {
+  try {
+    const r = await fetch(`${ESPN}/football/nfl/standings`);
+    const d = await r.json();
+    const groups = (d.children||[]).flatMap(conf =>
+      (conf.children||[]).map(div => ({
+        conference: conf.name,
+        division: div.name,
+        teams: (div.standings?.entries||[]).map(e => ({
+          team: e.team?.displayName||"",
+          logo: e.team?.logos?.[0]?.href||"",
+          wins: e.stats?.find(s=>s.name==="wins")?.value||0,
+          losses: e.stats?.find(s=>s.name==="losses")?.value||0,
+          pct: e.stats?.find(s=>s.name==="winPercent")?.displayValue||"",
+        }))
+      }))
+    );
+    res.json(groups);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// NHL
+app.get("/nhl/games", async (req,res) => {
+  try {
+    const r = await fetch(`${ESPN}/hockey/nhl/scoreboard`);
+    const d = await r.json();
+    const events = (d.events||[]).map(e => ({
+      id: e.id, name: e.name, date: e.date,
+      status: e.status?.type?.description||"scheduled",
+      completed: e.status?.type?.completed||false,
+      home: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.team?.displayName||"",
+      away: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.team?.displayName||"",
+      homeLogo: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.team?.logo||"",
+      awayLogo: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.team?.logo||"",
+      homeScore: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.score||"",
+      awayScore: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.score||"",
+    }));
+    res.json(events);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+app.get("/nhl/standings", async (req,res) => {
+  try {
+    const r = await fetch(`${ESPN}/hockey/nhl/standings`);
+    const d = await r.json();
+    const groups = (d.children||[]).flatMap(conf =>
+      (conf.children||[]).map(div => ({
+        conference: conf.name, division: div.name,
+        teams: (div.standings?.entries||[]).map(e => ({
+          team: e.team?.displayName||"",
+          logo: e.team?.logos?.[0]?.href||"",
+          wins: e.stats?.find(s=>s.name==="wins")?.value||0,
+          losses: e.stats?.find(s=>s.name==="losses")?.value||0,
+          points: e.stats?.find(s=>s.name==="points")?.value||0,
+        }))
+      }))
+    );
+    res.json(groups);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Tennis (ATP/WTA via ESPN)
+app.get("/tennis/scores", async (req,res) => {
+  try {
+    const r = await fetch(`${ESPN}/tennis/scoreboard`);
+    const d = await r.json();
+    const events = (d.events||[]).slice(0,20).map(e => ({
+      id: e.id, name: e.name, date: e.date,
+      tournament: e.competitions?.[0]?.notes?.[0]?.headline||e.name||"",
+      status: e.status?.type?.description||"scheduled",
+      completed: e.status?.type?.completed||false,
+      player1: e.competitions?.[0]?.competitors?.[0]?.athlete?.displayName||"",
+      player2: e.competitions?.[0]?.competitors?.[1]?.athlete?.displayName||"",
+      score1: e.competitions?.[0]?.competitors?.[0]?.score||"",
+      score2: e.competitions?.[0]?.competitors?.[1]?.score||"",
+      flag1: e.competitions?.[0]?.competitors?.[0]?.athlete?.flag?.href||"",
+      flag2: e.competitions?.[0]?.competitors?.[1]?.athlete?.flag?.href||"",
+    }));
+    res.json(events);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Rugby (via ESPN)
+app.get("/rugby/games", async (req,res) => {
+  try {
+    const r = await fetch(`${ESPN}/rugby/scoreboard`);
+    const d = await r.json();
+    const events = (d.events||[]).slice(0,20).map(e => ({
+      id: e.id, name: e.name, date: e.date,
+      status: e.status?.type?.description||"scheduled",
+      completed: e.status?.type?.completed||false,
+      home: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.team?.displayName||"",
+      away: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.team?.displayName||"",
+      homeScore: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="home")?.score||"",
+      awayScore: e.competitions?.[0]?.competitors?.find(c=>c.homeAway==="away")?.score||"",
+    }));
+    res.json(events);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// ── BLOG COMMENTS & LIKES (Supabase) ───────────────────────────────────────
+// Add comment to blog post
+app.post("/blog/:slug/comment", async (req,res) => {
+  const {name, comment} = req.body;
+  const {slug} = req.params;
+  if (!name||!comment) return res.status(400).json({error:"Name and comment required"});
+  if (!SUPABASE_ENABLED) return res.status(503).json({error:"Comments require database"});
+  try {
+    const {data,error} = await supabase.from("blog_comments").insert({
+      slug, name: name.substring(0,50), comment: comment.substring(0,500),
+      created_at: new Date().toISOString()
+    }).select().single();
+    if (error) throw error;
+    res.json({success:true, comment:data});
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Get comments for blog post
+app.get("/blog/:slug/comments", async (req,res) => {
+  if (!SUPABASE_ENABLED) return res.json([]);
+  try {
+    const {data} = await supabase.from("blog_comments")
+      .select("*").eq("slug",req.params.slug)
+      .order("created_at",{ascending:false}).limit(50);
+    res.json(data||[]);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Like a blog post
+app.post("/blog/:slug/like", async (req,res) => {
+  if (!SUPABASE_ENABLED) return res.json({likes:0});
+  try {
+    const {data:post} = await supabase.from("blog_posts").select("likes").eq("slug",req.params.slug).single();
+    const newLikes = (post?.likes||0)+1;
+    await supabase.from("blog_posts").update({likes:newLikes}).eq("slug",req.params.slug);
+    res.json({likes:newLikes});
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Multi-sport prediction endpoint
+app.post("/predict/sport", async (req,res) => {
+  const {home,away,sport,league} = req.body;
+  if (!home||!away) return res.status(400).json({error:"Teams required"});
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
+      body:JSON.stringify({
+        model:"claude-sonnet-4-6",max_tokens:1000,
+        system:`You are an expert ${sport} analyst. Always respond with ONLY valid JSON:
+{"result":"${sport==="tennis"?"Player 1 Win"|"Player 2 Win":"Home Win"|"Away Win"|"${sport==="nfl"||sport==="nba"?"":"Draw"}"}","result_confidence":<0-100>,"score":"<predicted score>","key_factors":["<factor1>","<factor2>","<factor3>"],"reasoning":"<2-3 sentences>"}`,
+        messages:[{role:"user",content:`Predict this ${sport} match: ${home} vs ${away}${league?` in ${league}`:""}`}]
+      })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error.message);
+    const text = d.content?.map(c=>c.text||"").join("")||"";
+    res.json(JSON.parse(text.replace(/```json|```/g,"").trim()));
+  } catch(e){ res.status(500).json({error:e.message}); }
 });
 
 app.get("/", (req,res) => res.send("ScoutAI Server v3.0 ✅"));
