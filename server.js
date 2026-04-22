@@ -726,11 +726,81 @@ app.get("/accuracy", (req, res) => {
 });
 
 // ── CRON ───────────────────────────────────────────────────────────────────
+
+// ── PREDICTION RESOLVER ────────────────────────────────────────────────────
+async function resolvePredictions() {
+  try {
+    let pending = [];
+    if (SUPABASE_ENABLED) {
+      const { data } = await supabase.from("predictions").select("*").eq("status","pending");
+      pending = data || [];
+    } else {
+      pending = memPredictions.filter(p => p.status === "pending");
+    }
+    if (!pending.length) { console.log("No pending predictions to resolve"); return 0; }
+
+    console.log(`Resolving ${pending.length} pending predictions...`);
+    let resolved = 0;
+
+    for (const pred of pending) {
+      try {
+        // Need a fixture id - extract from key (format: compId_index or compId_fixtureId)
+        const compId = pred.comp_id;
+        if (!compId) continue;
+
+        // Fetch recent results for this competition
+        const results = await afGet("/fixtures?league=" + compId + "&season=2025&last=20&status=FT");
+        if (!results || !results.length) continue;
+
+        // Find matching fixture by team names
+        const match = results.find(f => {
+          const h = f.teams?.home?.name?.toLowerCase() || "";
+          const a = f.teams?.away?.name?.toLowerCase() || "";
+          const ph = pred.home?.toLowerCase() || "";
+          const pa = pred.away?.toLowerCase() || "";
+          return (h.includes(ph.substring(0,6)) || ph.includes(h.substring(0,6))) &&
+                 (a.includes(pa.substring(0,6)) || pa.includes(a.substring(0,6)));
+        });
+
+        if (!match) continue;
+
+        const homeGoals = match.goals?.home;
+        const awayGoals = match.goals?.away;
+        if (homeGoals === null || homeGoals === undefined) continue;
+
+        // Determine actual result
+        let actualResult;
+        if (homeGoals > awayGoals) actualResult = "Home Win";
+        else if (awayGoals > homeGoals) actualResult = "Away Win";
+        else actualResult = "Draw";
+
+        const status = actualResult === pred.result ? "won" : "lost";
+
+        if (SUPABASE_ENABLED) {
+          await supabase.from("predictions").update({
+            status,
+            actual_result: actualResult,
+            actual_score: `${homeGoals}-${awayGoals}`
+          }).eq("key", pred.key);
+        } else {
+          const mp = memPredictions.find(p => p.key === pred.key);
+          if (mp) { mp.status = status; mp.actual_result = actualResult; }
+        }
+        resolved++;
+        console.log(`Resolved: ${pred.home} vs ${pred.away} — predicted ${pred.result}, actual ${actualResult} → ${status}`);
+      } catch(e) { console.error("Error resolving prediction:", pred.key, e.message); }
+    }
+    console.log(`Resolution complete: ${resolved}/${pending.length} resolved`);
+    return resolved;
+  } catch(e) { console.error("resolvePredictions error:", e.message); return 0; }
+}
+
 app.get("/cron/daily", async (req, res) => {
   const secret = req.headers["x-cron-secret"]||req.query.secret;
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
   const results = { errors:[] };
   try { await autoBlog(); results.blogGenerated = true; } catch(e) { results.errors.push("Blog: "+e.message); }
+  try { results.predictionsResolved = await resolvePredictions(); } catch(e) { results.errors.push("Resolve: "+e.message); }
   res.json({ success:true, timestamp:new Date().toISOString(), ...results });
 });
 
@@ -739,6 +809,11 @@ app.get("/ping", (req, res) => res.json({ ok:true, ts:Date.now() }));
 // ── STARTUP & SCHEDULED TASKS ──────────────────────────────────────────────
 // Keep alive ping
 setInterval(async () => { try { await fetch("https://scoutai-server.onrender.com/ping"); } catch {} }, 5*60*1000);
+
+// Resolve predictions every 2 hours
+setInterval(async () => { try { await resolvePredictions(); } catch(e) {} }, 2*60*60*1000);
+// Also resolve on startup after 30 seconds
+setTimeout(async () => { try { await resolvePredictions(); } catch(e) {} }, 30000);
 
 // Schedule daily blog at 8am
 function scheduleDailyBlog() {
