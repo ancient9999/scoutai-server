@@ -53,25 +53,26 @@ async function fetchRetry(url, opts = {}, retries = 3) {
 
 // ── LEAGUES CONFIG ─────────────────────────────────────────────────────────
 const LEAGUES = {
-  PL:  { id:39,  name:"Premier League",      country:"England",     flag:"🏴󠁧󠁢󠁥󠁮󠁧󠁿", season:2024 },
-  PD:  { id:140, name:"La Liga",             country:"Spain",       flag:"🇪🇸", season:2024 },
-  BL1: { id:78,  name:"Bundesliga",          country:"Germany",     flag:"🇩🇪", season:2024 },
-  SA:  { id:135, name:"Serie A",             country:"Italy",       flag:"🇮🇹", season:2024 },
-  FL1: { id:61,  name:"Ligue 1",             country:"France",      flag:"🇫🇷", season:2024 },
-  DED: { id:88,  name:"Eredivisie",          country:"Netherlands", flag:"🇳🇱", season:2024 },
-  PPL: { id:94,  name:"Primeira Liga",       country:"Portugal",    flag:"🇵🇹", season:2024 },
-  ELC: { id:40,  name:"Championship",        country:"England",     flag:"🏴󠁧󠁢󠁥󠁮󠁧󠁿", season:2024 },
-  SPL: { id:179, name:"Scottish Prem",       country:"Scotland",    flag:"🏴󠁧󠁢󠁳󠁣󠁴󠁿", season:2024 },
-  BEL: { id:144, name:"Belgian Pro League",  country:"Belgium",     flag:"🇧🇪", season:2024 },
-  TUR: { id:203, name:"Super Lig",           country:"Turkey",      flag:"🇹🇷", season:2024 },
-  GRE: { id:197, name:"Super League",        country:"Greece",      flag:"🇬🇷", season:2024 },
-  SAU: { id:307, name:"Saudi Pro League",    country:"Saudi Arabia",flag:"🇸🇦", season:2024 },
+  // 2025/26 season - all European leagues use season 2025
+  PL:  { id:39,  name:"Premier League",      country:"England",     flag:"🏴󠁧󠁢󠁥󠁮󠁧󠁿", season:2025 },
+  PD:  { id:140, name:"La Liga",             country:"Spain",       flag:"🇪🇸", season:2025 },
+  BL1: { id:78,  name:"Bundesliga",          country:"Germany",     flag:"🇩🇪", season:2025 },
+  SA:  { id:135, name:"Serie A",             country:"Italy",       flag:"🇮🇹", season:2025 },
+  FL1: { id:61,  name:"Ligue 1",             country:"France",      flag:"🇫🇷", season:2025 },
+  DED: { id:88,  name:"Eredivisie",          country:"Netherlands", flag:"🇳🇱", season:2025 },
+  PPL: { id:94,  name:"Primeira Liga",       country:"Portugal",    flag:"🇵🇹", season:2025 },
+  ELC: { id:40,  name:"Championship",        country:"England",     flag:"🏴󠁧󠁢󠁥󠁮󠁧󠁿", season:2025 },
+  SPL: { id:179, name:"Scottish Prem",       country:"Scotland",    flag:"🏴󠁧󠁢󠁳󠁣󠁴󠁿", season:2025 },
+  BEL: { id:144, name:"Belgian Pro League",  country:"Belgium",     flag:"🇧🇪", season:2025 },
+  TUR: { id:203, name:"Super Lig",           country:"Turkey",      flag:"🇹🇷", season:2025 },
+  GRE: { id:197, name:"Super League",        country:"Greece",      flag:"🇬🇷", season:2025 },
+  SAU: { id:307, name:"Saudi Pro League",    country:"Saudi Arabia",flag:"🇸🇦", season:2025 },
   MLS: { id:253, name:"MLS",                 country:"USA",         flag:"🇺🇸", season:2025 },
   BSA: { id:71,  name:"Serie A",             country:"Brazil",      flag:"🇧🇷", season:2025 },
-  ARG: { id:128, name:"Liga Profesional",    country:"Argentina",   flag:"🇦🇷", season:2024 },
+  ARG: { id:128, name:"Liga Profesional",    country:"Argentina",   flag:"🇦🇷", season:2025 },
   MEX: { id:262, name:"Liga MX",             country:"Mexico",      flag:"🇲🇽", season:2025 },
-  CL:  { id:2,   name:"Champions League",    country:"Europe",      flag:"🏆", season:2024 },
-  EL:  { id:3,   name:"Europa League",       country:"Europe",      flag:"🥈", season:2024 },
+  CL:  { id:2,   name:"Champions League",    country:"Europe",      flag:"🏆", season:2025 },
+  EL:  { id:3,   name:"Europa League",       country:"Europe",      flag:"🥈", season:2025 },
   WC:  { id:1,   name:"World Cup",           country:"World",       flag:"🌍", season:2026 },
 };
 
@@ -761,5 +762,14 @@ setTimeout(async () => {
   } catch(e) { console.error("Blog check error:", e.message); }
 }, 10000);
 
-app.get("/", (req, res) => res.send("ScoutAI Server v5.0 — Always On"));
+// Clear all fixture/result caches on startup to force fresh data with correct season
+["PL","PD","BL1","SA","FL1","DED","PPL","ELC","SPL","BEL","TUR","GRE","SAU","MLS","BSA","ARG","MEX","CL","EL"].forEach(id => {
+  cache.delete("fix_" + id);
+  cache.delete("res_" + id);
+  cache.delete("stand_" + id);
+  cache.delete("af_/fixtures?league=" + (LEAGUES[id]?.id) + "&season=2024" + "%");
+});
+console.log("Cache cleared for fresh 2025/26 season data");
+
+app.get("/", (req, res) => res.send("ScoutAI Server v5.0 — Always On · Season 2025/26"));
 app.listen(PORT, () => console.log("ScoutAI on port " + PORT));
