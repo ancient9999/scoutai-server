@@ -419,7 +419,7 @@ async function callClaude(systemPrompt, userMsg, maxTokens = 1200) {
 }
 
 async function predictFootball(home, away, homeId, awayId, compId) {
-  const sys = "Expert football analyst. Use all data provided. Respond ONLY with valid JSON: {"result":"Home Win|Draw|Away Win","result_confidence":<0-100>,"over25":true|false,"over25_confidence":<0-100>,"btts":true|false,"btts_confidence":<0-100>,"score":"<e.g.2-1>","reasoning":"<2-3 sentences>"}";
+  const sys = "Expert football analyst. Respond ONLY with valid JSON: {\"result\":\"Home Win or Draw or Away Win\",\"result_confidence\":70,\"over25\":true,\"over25_confidence\":65,\"btts\":true,\"btts_confidence\":60,\"score\":\"2-1\",\"reasoning\":\"analysis\"}";
   const msg = "Predict: " + home + " (HOME) vs " + away + " (AWAY)" + (compId ? " in " + (AF_LEAGUES[compId]?.name || compId) : "");
   const result = await callClaude(sys, msg);
   result.dataSource = "ai";
@@ -428,13 +428,13 @@ async function predictFootball(home, away, homeId, awayId, compId) {
 
 async function predictSport(home, away, sport, league) {
   const prompts = {
-    basketball: "Expert NBA analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"over_under":"Over|Under","line":<number>,"over_under_confidence":<0-100>,"score":"<e.g.112-108>","reasoning":"<2-3 sentences>"}",
-    nfl: "Expert NFL analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"score":"<e.g.24-17>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
-    nhl: "Expert NHL analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"score":"<e.g.3-2>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
-    tennis: "Expert tennis analyst. Respond ONLY with valid JSON: {"result":"Player 1 Win|Player 2 Win","result_confidence":<0-100>,"score":"<e.g.6-4 6-3>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
-    rugby: "Expert rugby analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win|Draw","result_confidence":<0-100>,"score":"<e.g.24-18>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
+    basketball: 'Expert NBA analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win","result_confidence":70,"over_under":"Over or Under","line":220,"over_under_confidence":65,"score":"112-108","reasoning":"analysis here"}',
+    nfl: 'Expert NFL analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win","result_confidence":70,"score":"24-17","key_factors":["factor1","factor2","factor3"],"reasoning":"analysis here"}',
+    nhl: 'Expert NHL analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win","result_confidence":70,"score":"3-2","key_factors":["factor1","factor2","factor3"],"reasoning":"analysis here"}',
+    tennis: 'Expert tennis analyst. Respond ONLY with valid JSON: {"result":"Player 1 Win or Player 2 Win","result_confidence":70,"score":"6-4 6-3","key_factors":["factor1","factor2","factor3"],"reasoning":"analysis here"}',
+    rugby: 'Expert rugby analyst. Respond ONLY with valid JSON: {"result":"Home Win or Away Win or Draw","result_confidence":70,"score":"24-18","key_factors":["factor1","factor2","factor3"],"reasoning":"analysis here"}',
   };
-  return await callClaude(prompts[sport] || prompts.nfl, "Predict: " + home + " vs " + away + (league ? " (" + league + ")" : ""));
+    return await callClaude(prompts[sport] || prompts.nfl, "Predict: " + home + " vs " + away + (league ? " (" + league + ")" : ""));
 }
 
 app.post("/predict", async (req, res) => {
