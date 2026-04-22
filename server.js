@@ -815,15 +815,19 @@ setInterval(async () => { try { await resolvePredictions(); } catch(e) {} }, 2*6
 // Also resolve on startup after 30 seconds
 setTimeout(async () => { try { await resolvePredictions(); } catch(e) {} }, 30000);
 
-// Schedule daily blog at 8am
-function scheduleDailyBlog() {
+// Schedule daily blog - check every hour if it's 8am
+// More resilient to server restarts than a single setTimeout
+let lastBlogDate = null;
+setInterval(async () => {
   const now = new Date();
-  const next = new Date(now);
-  next.setHours(8,0,0,0);
-  if (next <= now) next.setDate(next.getDate()+1);
-  setTimeout(async () => { await autoBlog(); setInterval(autoBlog, 24*60*60*1000); }, next-now);
-}
-scheduleDailyBlog();
+  const today = now.toISOString().split("T")[0];
+  const hour = now.getHours();
+  if (hour === 8 && lastBlogDate !== today) {
+    lastBlogDate = today;
+    console.log("Hourly check: 8am detected, running autoBlog...");
+    try { await autoBlog(); } catch(e) { console.error("Scheduled blog error:", e.message); }
+  }
+}, 60*60*1000); // check every hour
 
 // Auto-generate blog if empty on startup
 setTimeout(async () => {
