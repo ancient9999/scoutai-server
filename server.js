@@ -11,134 +11,243 @@ app.use(express.json());
 const resend = new Resend(process.env.RESEND_API_KEY);
 const SUPABASE_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 const supabase = SUPABASE_ENABLED ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY) : null;
-const FKEY = () => ({ "X-Auth-Token": process.env.FOOTBALL_API_KEY });
-const BKEY = () => ({ "Authorization": process.env.BDL_API_KEY });
-const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
-const memPredictions = [], memSubs = [];
 
-const COMPS = {
-  PL:  { name:"Premier League",        country:"England",     flag:"PL"  },
-  PD:  { name:"La Liga",               country:"Spain",       flag:"PD"  },
-  BL1: { name:"Bundesliga",            country:"Germany",     flag:"BL1" },
-  SA:  { name:"Serie A",               country:"Italy",       flag:"SA"  },
-  FL1: { name:"Ligue 1",               country:"France",      flag:"FL1" },
-  DED: { name:"Eredivisie",            country:"Netherlands", flag:"DED" },
-  PPL: { name:"Primeira Liga",         country:"Portugal",    flag:"PPL" },
-  ELC: { name:"Championship",          country:"England",     flag:"ELC" },
-  BSA: { name:"Serie A Brasil",        country:"Brazil",      flag:"BSA" },
-  CL:  { name:"Champions League",      country:"Europe",      flag:"CL"  },
-  EC:  { name:"European Championship", country:"Europe",      flag:"EC"  },
-  WC:  { name:"FIFA World Cup",         country:"World",       flag:"WC"  },
+// ── API KEYS ───────────────────────────────────────────────────────────────
+const FKEY = { "X-Auth-Token": process.env.FOOTBALL_API_KEY };
+const BKEY = { "Authorization": process.env.BDL_API_KEY };
+const RKEY = { "x-apisports-key": process.env.RAPID_API_KEY };
+const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
+const APIF = "https://v3.football.api-sports.io";
+
+// ── SMART CACHE ────────────────────────────────────────────────────────────
+const cache = {};
+function getCache(key) {
+  const c = cache[key];
+  if (!c) return null;
+  if (Date.now() - c.ts > c.ttl) return null;
+  return c.data;
+}
+function setCache(key, data, ttlMs) {
+  cache[key] = { data, ts: Date.now(), ttl: ttlMs };
+}
+
+const TTL = {
+  FIXTURES: 3 * 60 * 60 * 1000,      // 3 hours
+  STANDINGS: 6 * 60 * 60 * 1000,     // 6 hours
+  LIVE: 60 * 1000,                    // 1 minute
+  RESULTS: 30 * 60 * 1000,           // 30 minutes
+  NBA: 5 * 60 * 1000,                // 5 minutes
+  ESPN_GAMES: 2 * 60 * 1000,         // 2 minutes
 };
 
-// ── FOOTBALL FIXTURES ──────────────────────────────────────────────────────
-app.get("/fixtures/:compId", async (req, res) => {
-  const id = req.params.compId.toUpperCase();
-  if (!COMPS[id]) return res.status(400).json({ error: "Invalid competition" });
-  try {
-    const today = new Date();
-    const from = today.toISOString().split("T")[0];
-    const to = new Date(today.getTime() + 30*24*60*60*1000).toISOString().split("T")[0];
-    let r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/matches?status=SCHEDULED&dateFrom=" + from + "&dateTo=" + to, { headers: FKEY() });
-    let d = await r.json();
-    let matches = d.matches || [];
-    if (!matches.length) {
-      r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/matches?status=SCHEDULED", { headers: FKEY() });
-      d = await r.json();
-      matches = d.matches || [];
+// ── RETRY FETCH ────────────────────────────────────────────────────────────
+async function fetchWithRetry(url, opts = {}, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(10000) });
+      if (r.ok) return r;
+      if (r.status === 429) {
+        await new Promise(res => setTimeout(res, 2000 * (i + 1)));
+        continue;
+      }
+      return r;
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(res => setTimeout(res, 1000 * (i + 1)));
     }
-    res.json(matches.slice(0, 12).map(m => ({
-      id: m.id, homeId: m.homeTeam.id, awayId: m.awayTeam.id,
-      home: m.homeTeam.name, away: m.awayTeam.name,
-      homeCrest: m.homeTeam.crest, awayCrest: m.awayTeam.crest,
-      date: m.utcDate, round: m.matchday ? "Matchday " + m.matchday : (m.stage || ""),
-    })));
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  }
+}
+
+// ── API-FOOTBALL LEAGUE IDS ────────────────────────────────────────────────
+const AF_LEAGUES = {
+  // Top European
+  PL:   { id: 39,  name: "Premier League",      country: "England",     flag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", season: 2024 },
+  PD:   { id: 140, name: "La Liga",              country: "Spain",       flag: "🇪🇸", season: 2024 },
+  BL1:  { id: 78,  name: "Bundesliga",           country: "Germany",     flag: "🇩🇪", season: 2024 },
+  SA:   { id: 135, name: "Serie A",              country: "Italy",       flag: "🇮🇹", season: 2024 },
+  FL1:  { id: 61,  name: "Ligue 1",              country: "France",      flag: "🇫🇷", season: 2024 },
+  DED:  { id: 88,  name: "Eredivisie",           country: "Netherlands", flag: "🇳🇱", season: 2024 },
+  PPL:  { id: 94,  name: "Primeira Liga",        country: "Portugal",    flag: "🇵🇹", season: 2024 },
+  ELC:  { id: 40,  name: "Championship",         country: "England",     flag: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", season: 2024 },
+  SPL:  { id: 179, name: "Scottish Premiership", country: "Scotland",    flag: "🏴󠁧󠁢󠁳󠁣󠁴󠁿", season: 2024 },
+  BEL:  { id: 144, name: "Belgian Pro League",   country: "Belgium",     flag: "🇧🇪", season: 2024 },
+  // More Europe
+  TUR:  { id: 203, name: "Süper Lig",            country: "Turkey",      flag: "🇹🇷", season: 2024 },
+  GRE:  { id: 197, name: "Super League",         country: "Greece",      flag: "🇬🇷", season: 2024 },
+  RUS:  { id: 235, name: "Premier League",       country: "Russia",      flag: "🇷🇺", season: 2024 },
+  // Rest of World
+  SAU:  { id: 307, name: "Saudi Pro League",     country: "Saudi Arabia",flag: "🇸🇦", season: 2024 },
+  MLS:  { id: 253, name: "MLS",                  country: "USA",         flag: "🇺🇸", season: 2025 },
+  BSA:  { id: 71,  name: "Serie A",              country: "Brazil",      flag: "🇧🇷", season: 2025 },
+  ARG:  { id: 128, name: "Liga Profesional",     country: "Argentina",   flag: "🇦🇷", season: 2024 },
+  MEX:  { id: 262, name: "Liga MX",              country: "Mexico",      flag: "🇲🇽", season: 2025 },
+  // Cups
+  CL:   { id: 2,   name: "Champions League",     country: "Europe",      flag: "🏆", season: 2024 },
+  EL:   { id: 3,   name: "Europa League",        country: "Europe",      flag: "🥈", season: 2024 },
+  WC:   { id: 1,   name: "World Cup",            country: "World",       flag: "🌍", season: 2026 },
+};
+
+const memPredictions = [], memSubs = [];
+
+// ── API-FOOTBALL HELPERS ───────────────────────────────────────────────────
+async function afGet(endpoint) {
+  const cacheKey = "af_" + endpoint;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+  try {
+    const r = await fetchWithRetry(APIF + endpoint, { headers: RKEY });
+    const d = await r.json();
+    if (d.results > 0 || d.response?.length > 0) {
+      setCache(cacheKey, d.response || [], TTL.FIXTURES);
+    }
+    return d.response || [];
+  } catch (e) {
+    console.error("API-Football error:", e.message);
+    return [];
+  }
+}
+
+function mapAfFixture(f) {
+  return {
+    id: f.fixture?.id,
+    homeId: f.teams?.home?.id,
+    awayId: f.teams?.away?.id,
+    home: f.teams?.home?.name || "",
+    away: f.teams?.away?.name || "",
+    homeCrest: f.teams?.home?.logo || "",
+    awayCrest: f.teams?.away?.logo || "",
+    date: f.fixture?.date || "",
+    round: f.league?.round || "",
+    status: f.fixture?.status?.short || "",
+    statusLong: f.fixture?.status?.long || "",
+    elapsed: f.fixture?.status?.elapsed || null,
+    homeScore: f.goals?.home,
+    awayScore: f.goals?.away,
+    venue: f.fixture?.venue?.name || "",
+    compId: null,
+  };
+}
+
+// ── FIXTURES ENDPOINT ──────────────────────────────────────────────────────
+app.get("/fixtures/:compId", async (req, res) => {
+  const compId = req.params.compId.toUpperCase();
+  const league = AF_LEAGUES[compId];
+  if (!league) return res.status(400).json({ error: "Unknown league" });
+
+  const cacheKey = "fixtures_" + compId;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const data = await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+    const fixtures = data.slice(0, 15).map(f => ({ ...mapAfFixture(f), compId }));
+    setCache(cacheKey, fixtures, TTL.FIXTURES);
+    res.json(fixtures);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── TODAY RESULTS ──────────────────────────────────────────────────────────
+app.get("/results/:compId", async (req, res) => {
+  const compId = req.params.compId.toUpperCase();
+  const league = AF_LEAGUES[compId];
+  if (!league) return res.status(400).json({ error: "Unknown league" });
+
+  const cacheKey = "results_" + compId;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const yesterday = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const data = await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + yesterday + "&to=" + today + "&status=FT-AET-PEN");
+    const results = data.slice(0, 10).map(f => ({ ...mapAfFixture(f), compId }));
+    setCache(cacheKey, results, TTL.RESULTS);
+    res.json(results);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── LIVE SCORES ────────────────────────────────────────────────────────────
+app.get("/live/:compId", async (req, res) => {
+  const compId = req.params.compId.toUpperCase();
+  const league = AF_LEAGUES[compId];
+  if (!league) return res.json([]);
+
+  const cacheKey = "live_" + compId;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const data = await afGet("/fixtures?live=" + league.id);
+    const live = data.map(f => ({ ...mapAfFixture(f), compId }));
+    setCache(cacheKey, live, TTL.LIVE);
+    res.json(live);
+  } catch (e) { res.json([]); }
 });
 
 // ── STANDINGS ──────────────────────────────────────────────────────────────
 app.get("/standings/:compId", async (req, res) => {
-  const id = req.params.compId.toUpperCase();
+  const compId = req.params.compId.toUpperCase();
+  const league = AF_LEAGUES[compId];
+  if (!league) return res.status(400).json({ error: "Unknown league" });
+
+  const cacheKey = "standings_" + compId;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
   try {
-    let r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/standings", { headers: FKEY() });
-    let d = await r.json();
-    if (!d.standings) {
-      r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/standings?season=2024", { headers: FKEY() });
-      d = await r.json();
-    }
-    const table = (d.standings || []).find(s => s.type === "TOTAL")?.table || [];
-    res.json(table.map(e => ({
-      position: e.position, team: e.team.name, crest: e.team.crest, teamId: e.team.id,
-      played: e.playedGames, won: e.won, draw: e.draw, lost: e.lost,
-      gf: e.goalsFor, ga: e.goalsAgainst, gd: e.goalDifference, points: e.points, form: e.form
-    })));
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const data = await afGet("/standings?league=" + league.id + "&season=" + league.season);
+    const table = (data[0]?.league?.standings?.[0] || []).map(e => ({
+      position: e.rank,
+      team: e.team?.name || "",
+      crest: e.team?.logo || "",
+      teamId: e.team?.id,
+      played: e.all?.played || 0,
+      won: e.all?.win || 0,
+      draw: e.all?.draw || 0,
+      lost: e.all?.lose || 0,
+      gf: e.all?.goals?.for || 0,
+      ga: e.all?.goals?.against || 0,
+      gd: e.goalsDiff || 0,
+      points: e.points || 0,
+      form: e.form || ""
+    }));
+    setCache(cacheKey, table, TTL.STANDINGS);
+    res.json(table);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── SCORERS ────────────────────────────────────────────────────────────────
 app.get("/scorers/:compId", async (req, res) => {
-  const id = req.params.compId.toUpperCase();
-  try {
-    let r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/scorers?limit=10", { headers: FKEY() });
-    let d = await r.json();
-    if (!d.scorers?.length) {
-      r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/scorers?limit=10&season=2024", { headers: FKEY() });
-      d = await r.json();
-    }
-    res.json((d.scorers || []).map(s => ({
-      name: s.player.name, nationality: s.player.nationality,
-      team: s.team.name, crest: s.team.crest,
-      goals: s.goals, assists: s.assists || 0, penalties: s.penalties || 0
-    })));
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+  const compId = req.params.compId.toUpperCase();
+  const league = AF_LEAGUES[compId];
+  if (!league) return res.status(400).json({ error: "Unknown league" });
 
-// ── TEAM ───────────────────────────────────────────────────────────────────
-app.get("/team/:teamId", async (req, res) => {
-  try {
-    const r = await fetch("https://api.football-data.org/v4/teams/" + req.params.teamId, { headers: FKEY() });
-    const d = await r.json();
-    res.json({
-      id: d.id, name: d.name, shortName: d.shortName, crest: d.crest,
-      website: d.website, founded: d.founded, venue: d.venue, clubColors: d.clubColors,
-      squad: (d.squad || []).map(p => ({ id: p.id, name: p.name, position: p.position, nationality: p.nationality, dateOfBirth: p.dateOfBirth })),
-      runningCompetitions: (d.runningCompetitions || []).map(c => ({ id: c.id, name: c.name }))
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+  const cacheKey = "scorers_" + compId;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
 
-app.get("/team/:teamId/matches", async (req, res) => {
   try {
-    const r = await fetch("https://api.football-data.org/v4/teams/" + req.params.teamId + "/matches?status=FINISHED&limit=10", { headers: FKEY() });
-    const d = await r.json();
-    res.json((d.matches || []).map(m => ({
-      id: m.id, date: m.utcDate,
-      home: m.homeTeam.name, away: m.awayTeam.name,
-      homeCrest: m.homeTeam.crest, awayCrest: m.awayTeam.crest,
-      homeScore: m.score.fullTime.home, awayScore: m.score.fullTime.away,
-      competition: m.competition.name
-    })));
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const data = await afGet("/players/topscorers?league=" + league.id + "&season=" + league.season);
+    const scorers = data.slice(0, 10).map(s => ({
+      name: s.player?.name || "",
+      nationality: s.player?.nationality || "",
+      team: s.statistics?.[0]?.team?.name || "",
+      crest: s.statistics?.[0]?.team?.logo || "",
+      goals: s.statistics?.[0]?.goals?.total || 0,
+      assists: s.statistics?.[0]?.goals?.assists || 0,
+      penalties: s.statistics?.[0]?.penalty?.scored || 0
+    }));
+    setCache(cacheKey, scorers, TTL.STANDINGS);
+    res.json(scorers);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── NBA ────────────────────────────────────────────────────────────────────
-app.get("/nba/teams", async (req, res) => {
-  try {
-    const r = await fetch("https://api.balldontlie.io/nba/v2/teams?per_page=30", { headers: BKEY() });
-    const d = await r.json();
-    res.json(d.data || []);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get("/nba/standings", async (req, res) => {
-  try {
-    const r = await fetch("https://api.balldontlie.io/nba/v2/standings?season=2025", { headers: BKEY() });
-    const d = await r.json();
-    res.json(d.data || []);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 app.get("/nba/games", async (req, res) => {
+  const cached = getCache("nba_games");
+  if (cached) return res.json(cached);
   try {
     const today = new Date();
     const dates = [];
@@ -148,31 +257,55 @@ app.get("/nba/games", async (req, res) => {
       dates.push(dt.toISOString().split("T")[0]);
     }
     const params = dates.map(d => "dates[]=" + d).join("&");
-    const r = await fetch("https://api.balldontlie.io/nba/v2/games?" + params + "&per_page=50", { headers: BKEY() });
+    const r = await fetchWithRetry("https://api.balldontlie.io/nba/v2/games?" + params + "&per_page=50", { headers: BKEY });
     const d = await r.json();
-    res.json(d.data || []);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const games = d.data || [];
+    setCache("nba_games", games, TTL.NBA);
+    res.json(games);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/nba/live", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
-    const r = await fetch("https://api.balldontlie.io/nba/v2/games?dates[]=" + today + "&per_page=15", { headers: BKEY() });
+    const r = await fetchWithRetry("https://api.balldontlie.io/nba/v2/games?dates[]=" + today + "&per_page=15", { headers: BKEY });
     const d = await r.json();
     res.json(d.data || []);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/nba/standings", async (req, res) => {
+  const cached = getCache("nba_standings");
+  if (cached) return res.json(cached);
+  try {
+    const r = await fetchWithRetry("https://api.balldontlie.io/nba/v2/standings?season=2025", { headers: BKEY });
+    const d = await r.json();
+    setCache("nba_standings", d.data || [], TTL.STANDINGS);
+    res.json(d.data || []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/nba/teams", async (req, res) => {
+  const cached = getCache("nba_teams");
+  if (cached) return res.json(cached);
+  try {
+    const r = await fetchWithRetry("https://api.balldontlie.io/nba/v2/teams?per_page=30", { headers: BKEY });
+    const d = await r.json();
+    setCache("nba_teams", d.data || [], 24 * 60 * 60 * 1000);
+    res.json(d.data || []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── ESPN SPORTS ────────────────────────────────────────────────────────────
 function mapEspnGame(e) {
-  const comps = e.competitions || [];
-  const c = comps[0] || {};
+  const c = (e.competitions || [])[0] || {};
   const home = (c.competitors || []).find(x => x.homeAway === "home") || {};
   const away = (c.competitors || []).find(x => x.homeAway === "away") || {};
   return {
     id: e.id, name: e.name, date: e.date,
     status: e.status?.type?.description || "Scheduled",
     completed: e.status?.type?.completed || false,
+    live: e.status?.type?.state === "in",
     home: home.team?.displayName || "", away: away.team?.displayName || "",
     homeLogo: home.team?.logo || "", awayLogo: away.team?.logo || "",
     homeScore: home.score || "", awayScore: away.score || "",
@@ -180,70 +313,43 @@ function mapEspnGame(e) {
   };
 }
 
-app.get("/nfl/games", async (req, res) => {
+async function getEspnGames(sport, league) {
+  const key = "espn_" + sport + "_" + league;
+  const cached = getCache(key);
+  if (cached) return cached;
   try {
-    const r = await fetch(ESPN + "/football/nfl/scoreboard");
+    const r = await fetchWithRetry(ESPN + "/" + sport + "/" + league + "/scoreboard");
     const d = await r.json();
-    res.json((d.events || []).map(mapEspnGame));
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+    const games = (d.events || []).map(mapEspnGame);
+    setCache(key, games, TTL.ESPN_GAMES);
+    return games;
+  } catch { return []; }
+}
 
+app.get("/nfl/games", async (req, res) => { res.json(await getEspnGames("football", "nfl")); });
 app.get("/nfl/standings", async (req, res) => {
   try {
-    const r = await fetch(ESPN + "/football/nfl/standings");
+    const r = await fetchWithRetry(ESPN + "/football/nfl/standings");
     const d = await r.json();
-    const groups = (d.children || []).flatMap(conf =>
-      (conf.children || []).map(div => ({
-        conference: conf.name, division: div.name,
-        teams: (div.standings?.entries || []).map(e => ({
-          team: e.team?.displayName || "",
-          logo: e.team?.logos?.[0]?.href || "",
-          wins: e.stats?.find(s => s.name === "wins")?.value || 0,
-          losses: e.stats?.find(s => s.name === "losses")?.value || 0,
-          pct: e.stats?.find(s => s.name === "winPercent")?.displayValue || ""
-        }))
+    res.json((d.children || []).flatMap(conf => (conf.children || []).map(div => ({
+      conference: conf.name, division: div.name,
+      teams: (div.standings?.entries || []).map(e => ({
+        team: e.team?.displayName || "", logo: e.team?.logos?.[0]?.href || "",
+        wins: e.stats?.find(s => s.name === "wins")?.value || 0,
+        losses: e.stats?.find(s => s.name === "losses")?.value || 0,
+        pct: e.stats?.find(s => s.name === "winPercent")?.displayValue || ""
       }))
-    );
-    res.json(groups);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    }))));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-app.get("/nhl/games", async (req, res) => {
-  try {
-    const r = await fetch(ESPN + "/hockey/nhl/scoreboard");
-    const d = await r.json();
-    res.json((d.events || []).map(mapEspnGame));
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get("/nhl/standings", async (req, res) => {
-  try {
-    const r = await fetch(ESPN + "/hockey/nhl/standings");
-    const d = await r.json();
-    const groups = (d.children || []).flatMap(conf =>
-      (conf.children || []).map(div => ({
-        conference: conf.name, division: div.name,
-        teams: (div.standings?.entries || []).map(e => ({
-          team: e.team?.displayName || "",
-          logo: e.team?.logos?.[0]?.href || "",
-          wins: e.stats?.find(s => s.name === "wins")?.value || 0,
-          losses: e.stats?.find(s => s.name === "losses")?.value || 0,
-          points: e.stats?.find(s => s.name === "points")?.value || 0
-        }))
-      }))
-    );
-    res.json(groups);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
+app.get("/nhl/games", async (req, res) => { res.json(await getEspnGames("hockey", "nhl")); });
 app.get("/tennis/scores", async (req, res) => {
   try {
-    const r = await fetch(ESPN + "/tennis/scoreboard");
+    const r = await fetchWithRetry(ESPN + "/tennis/scoreboard");
     const d = await r.json();
     res.json((d.events || []).slice(0, 20).map(e => {
       const c = (e.competitions || [])[0] || {};
-      const p1 = (c.competitors || [])[0] || {};
-      const p2 = (c.competitors || [])[1] || {};
+      const p1 = (c.competitors || [])[0] || {}, p2 = (c.competitors || [])[1] || {};
       return {
         id: e.id, name: e.name, date: e.date,
         tournament: (c.notes || [])[0]?.headline || e.name || "",
@@ -254,102 +360,57 @@ app.get("/tennis/scores", async (req, res) => {
         flag1: p1.athlete?.flag?.href || "", flag2: p2.athlete?.flag?.href || ""
       };
     }));
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-app.get("/rugby/games", async (req, res) => {
-  try {
-    const r = await fetch(ESPN + "/rugby/scoreboard");
-    const d = await r.json();
-    res.json((d.events || []).slice(0, 20).map(mapEspnGame));
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+app.get("/rugby/games", async (req, res) => { res.json(await getEspnGames("rugby", "scoreboard")); });
 
 // ── CURRENCY ───────────────────────────────────────────────────────────────
 app.get("/currency", async (req, res) => {
   try {
     const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress;
     if (!ip || ip === "127.0.0.1" || ip === "::1") return res.json({ currency: "USD", symbol: "$", country: "US" });
-    const r = await fetch("http://ip-api.com/json/" + ip + "?fields=country,countryCode,currency");
+    const r = await fetchWithRetry("http://ip-api.com/json/" + ip + "?fields=country,countryCode,currency");
     const d = await r.json();
     const sym = { USD:"$",GBP:"£",EUR:"€",CAD:"C$",AUD:"A$",NGN:"₦",BRL:"R$",JPY:"¥",INR:"₹",KRW:"₩",MXN:"$",ZAR:"R",CHF:"Fr",TRY:"₺",GHS:"₵",KES:"KSh" };
-    const currency = d.currency || "USD";
-    res.json({ currency, symbol: sym[currency] || currency, country: d.countryCode || "US", countryName: d.country || "" });
+    res.json({ currency: d.currency || "USD", symbol: sym[d.currency] || (d.currency || "USD"), country: d.countryCode || "US" });
   } catch { res.json({ currency: "USD", symbol: "$", country: "US" }); }
 });
 
 // ── DASHBOARD ──────────────────────────────────────────────────────────────
 app.get("/dashboard", async (req, res) => {
+  const cached = getCache("dashboard");
+  if (cached) return res.json(cached);
   try {
-    const today = new Date();
-    const from = today.toISOString().split("T")[0];
-    const to = new Date(today.getTime() + 3*24*60*60*1000).toISOString().split("T")[0];
-    const [football, nbaRes] = await Promise.all([
-      Promise.all(["PL","PD","BL1","SA","FL1"].map(async id => {
-        try {
-          const r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/matches?status=SCHEDULED&dateFrom=" + from + "&dateTo=" + to, { headers: FKEY() });
-          const d = await r.json();
-          return {
-            compId: id, compName: COMPS[id].name, flag: COMPS[id].flag,
-            matches: (d.matches || []).slice(0, 4).map(m => ({
-              id: m.id, home: m.homeTeam.name, away: m.awayTeam.name,
-              homeCrest: m.homeTeam.crest, awayCrest: m.awayTeam.crest, date: m.utcDate
-            }))
-          };
-        } catch { return { compId: id, compName: COMPS[id].name, flag: COMPS[id].flag, matches: [] }; }
-      })),
-      fetch("https://api.balldontlie.io/nba/v2/games?dates[]=" + from + "&per_page=8", { headers: BKEY() }).then(r => r.json()).catch(() => ({ data: [] }))
-    ]);
-    res.json({ football, nba: nbaRes.data || [] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const topLeagues = ["PL", "PD", "BL1", "SA", "FL1"];
+    const football = await Promise.all(topLeagues.map(async id => {
+      try {
+        const league = AF_LEAGUES[id];
+        const today = new Date().toISOString().split("T")[0];
+        const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+        const data = await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+        return {
+          compId: id, compName: league.name, flag: league.flag,
+          matches: data.slice(0, 4).map(f => ({
+            id: f.fixture?.id, home: f.teams?.home?.name, away: f.teams?.away?.name,
+            homeCrest: f.teams?.home?.logo, awayCrest: f.teams?.away?.logo, date: f.fixture?.date
+          }))
+        };
+      } catch { return { compId: id, compName: AF_LEAGUES[id].name, flag: AF_LEAGUES[id].flag, matches: [] }; }
+    }));
+    const nbaR = await fetchWithRetry("https://api.balldontlie.io/nba/v2/games?dates[]=" + new Date().toISOString().split("T")[0] + "&per_page=8", { headers: BKEY });
+    const nbaD = await nbaR.json();
+    const result = { football, nba: nbaD.data || [] };
+    setCache("dashboard", result, TTL.FIXTURES);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── AI PREDICTION HELPERS ──────────────────────────────────────────────────
-async function getForm(teamId) {
-  try {
-    const r = await fetch("https://api.football-data.org/v4/teams/" + teamId + "/matches?status=FINISHED&limit=10", { headers: FKEY() });
-    const d = await r.json();
-    if (!d.matches) return null;
-    return d.matches.slice(-5).map(m => {
-      const h = m.homeTeam.id === teamId;
-      const ts = h ? m.score.fullTime.home : m.score.fullTime.away;
-      const os = h ? m.score.fullTime.away : m.score.fullTime.home;
-      const res = ts > os ? "W" : ts < os ? "L" : "D";
-      const opp = h ? m.awayTeam.name : m.homeTeam.name;
-      return { result: res, score: ts + "-" + os, opponent: opp, venue: h ? "H" : "A", label: res + " " + ts + "-" + os + " vs " + opp };
-    });
-  } catch { return null; }
-}
-
-async function getH2H(hId, aId) {
-  try {
-    const r = await fetch("https://api.football-data.org/v4/teams/" + hId + "/matches?status=FINISHED&limit=20", { headers: FKEY() });
-    const d = await r.json();
-    if (!d.matches) return null;
-    return d.matches
-      .filter(m => (m.homeTeam.id === hId && m.awayTeam.id === aId) || (m.homeTeam.id === aId && m.awayTeam.id === hId))
-      .slice(-5)
-      .map(m => ({ home: m.homeTeam.name, away: m.awayTeam.name, homeScore: m.score.fullTime.home, awayScore: m.score.fullTime.away, date: m.utcDate }));
-  } catch { return null; }
-}
-
-async function getStanding(compId, teamId) {
-  try {
-    const r = await fetch("https://api.football-data.org/v4/competitions/" + compId + "/standings", { headers: FKEY() });
-    const d = await r.json();
-    if (!d.standings) return null;
-    const table = (d.standings.find(s => s.type === "TOTAL")?.table || []);
-    const e = table.find(e => e.team.id === teamId);
-    if (!e) return null;
-    return { position: e.position, played: e.playedGames, won: e.won, draw: e.draw, lost: e.lost, gf: e.goalsFor, ga: e.goalsAgainst, points: e.points };
-  } catch { return null; }
-}
-
-async function callClaude(systemPrompt, userMsg) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
+// ── AI HELPERS ─────────────────────────────────────────────────────────────
+async function callClaude(systemPrompt, userMsg, maxTokens = 1200) {
+  const r = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1200, system: systemPrompt, messages: [{ role: "user", content: userMsg }] })
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: maxTokens, system: systemPrompt, messages: [{ role: "user", content: userMsg }] })
   });
   const d = await r.json();
   if (d.error) throw new Error(d.error.message);
@@ -357,47 +418,23 @@ async function callClaude(systemPrompt, userMsg) {
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
 
-// ── FOOTBALL PREDICTION ────────────────────────────────────────────────────
 async function predictFootball(home, away, homeId, awayId, compId) {
-  let ctx = "";
-  let homeForm = null, awayForm = null, homeStand = null, awayStand = null, h2h = null;
-  if (homeId && awayId) {
-    [homeForm, awayForm, homeStand, awayStand, h2h] = await Promise.all([
-      getForm(homeId), getForm(awayId),
-      getStanding(compId?.toUpperCase() || "PL", homeId),
-      getStanding(compId?.toUpperCase() || "PL", awayId),
-      getH2H(homeId, awayId)
-    ]);
-    if (homeForm) ctx += "\n" + home + " last 5: " + homeForm.map(f => f.label).join(", ");
-    if (awayForm) ctx += "\n" + away + " last 5: " + awayForm.map(f => f.label).join(", ");
-    if (homeStand) ctx += "\n" + home + ": " + homeStand.position + "th, " + homeStand.points + "pts W" + homeStand.won + "D" + homeStand.draw + "L" + homeStand.lost;
-    if (awayStand) ctx += "\n" + away + ": " + awayStand.position + "th, " + awayStand.points + "pts W" + awayStand.won + "D" + awayStand.draw + "L" + awayStand.lost;
-    if (h2h?.length) ctx += "\nH2H: " + h2h.map(m => m.home + " " + m.homeScore + "-" + m.awayScore + " " + m.away).join(", ");
-  }
-  const sys = 'Expert football analyst. Use provided data as primary basis for prediction. Respond ONLY with valid JSON: {"result":"Home Win|Draw|Away Win","result_confidence":<0-100>,"over25":true|false,"over25_confidence":<0-100>,"btts":true|false,"btts_confidence":<0-100>,"score":"<e.g.2-1>","reasoning":"<2-3 sentences>"}';
-  const msg = "Predict: " + home + " (HOME) vs " + away + " (AWAY)." + (ctx ? "\n\nData:" + ctx : "");
-  const parsed = await callClaude(sys, msg);
-  parsed.dataSource = ctx ? "live" : "historical";
-  parsed.homeForm = homeForm;
-  parsed.awayForm = awayForm;
-  parsed.homeStanding = homeStand;
-  parsed.awayStanding = awayStand;
-  parsed.h2h = h2h;
-  return parsed;
+  const sys = "Expert football analyst. Use all data provided. Respond ONLY with valid JSON: {"result":"Home Win|Draw|Away Win","result_confidence":<0-100>,"over25":true|false,"over25_confidence":<0-100>,"btts":true|false,"btts_confidence":<0-100>,"score":"<e.g.2-1>","reasoning":"<2-3 sentences>"}";
+  const msg = "Predict: " + home + " (HOME) vs " + away + " (AWAY)" + (compId ? " in " + (AF_LEAGUES[compId]?.name || compId) : "");
+  const result = await callClaude(sys, msg);
+  result.dataSource = "ai";
+  return result;
 }
 
-// ── SPORT PREDICTION ───────────────────────────────────────────────────────
 async function predictSport(home, away, sport, league) {
-  const systemPrompts = {
-    basketball: 'Expert NBA analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"over_under":"Over|Under","line":<number>,"over_under_confidence":<0-100>,"score":"<e.g.112-108>","reasoning":"<2-3 sentences>"}',
-    nfl: 'Expert NFL analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"score":"<e.g.24-17>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}',
-    nhl: 'Expert NHL analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"score":"<e.g.3-2>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}',
-    tennis: 'Expert tennis analyst. Respond ONLY with valid JSON: {"result":"Player 1 Win|Player 2 Win","result_confidence":<0-100>,"score":"<e.g.6-4 6-3>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}',
-    rugby: 'Expert rugby analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win|Draw","result_confidence":<0-100>,"score":"<e.g.24-18>","key_factors":["factor1","factor2","factor3"],"reasoning":"<2-3 sentences>"}',
+  const prompts = {
+    basketball: "Expert NBA analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"over_under":"Over|Under","line":<number>,"over_under_confidence":<0-100>,"score":"<e.g.112-108>","reasoning":"<2-3 sentences>"}",
+    nfl: "Expert NFL analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"score":"<e.g.24-17>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
+    nhl: "Expert NHL analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win","result_confidence":<0-100>,"score":"<e.g.3-2>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
+    tennis: "Expert tennis analyst. Respond ONLY with valid JSON: {"result":"Player 1 Win|Player 2 Win","result_confidence":<0-100>,"score":"<e.g.6-4 6-3>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
+    rugby: "Expert rugby analyst. Respond ONLY with valid JSON: {"result":"Home Win|Away Win|Draw","result_confidence":<0-100>,"score":"<e.g.24-18>","key_factors":["f1","f2","f3"],"reasoning":"<2-3 sentences>"}",
   };
-  const sys = systemPrompts[sport] || systemPrompts.nfl;
-  const msg = "Predict: " + home + " vs " + away + (league ? " (" + league + ")" : "");
-  return await callClaude(sys, msg);
+  return await callClaude(prompts[sport] || prompts.nfl, "Predict: " + home + " vs " + away + (league ? " (" + league + ")" : ""));
 }
 
 app.post("/predict", async (req, res) => {
@@ -407,14 +444,14 @@ app.post("/predict", async (req, res) => {
     const s = sport || "football";
     const result = s === "football" ? await predictFootball(home, away, homeId, awayId, compId) : await predictSport(home, away, s, compId);
     res.json(result);
-  } catch(e) { res.status(500).json({ error: "Prediction failed: " + e.message }); }
+  } catch (e) { res.status(500).json({ error: "Prediction failed: " + e.message }); }
 });
 
 app.post("/predict/sport", async (req, res) => {
   const { home, away, sport, league } = req.body;
   if (!home || !away) return res.status(400).json({ error: "Teams required" });
   try { res.json(await predictSport(home, away, sport || "nfl", league)); }
-  catch(e) { res.status(500).json({ error: e.message }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── PREDICTION STORAGE ─────────────────────────────────────────────────────
@@ -428,168 +465,118 @@ app.post("/predictions/store", async (req, res) => {
       if (!memPredictions.find(p => p.key === key)) memPredictions.push({ key, home, away, result, score, confidence, date, sport: sport || "football", status: "pending", created_at: new Date().toISOString() });
     }
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── PERFORMANCE ────────────────────────────────────────────────────────────
 app.get("/performance", async (req, res) => {
   try {
     if (SUPABASE_ENABLED) {
-      const [{ data: summary }, { data: recent }] = await Promise.all([
-        supabase.from("performance_summary").select("*").single(),
-        supabase.from("predictions").select("home,away,result,actual_result,status,confidence,date,sport").neq("status", "pending").order("created_at", { ascending: false }).limit(20)
-      ]);
-      res.json({
-        total: summary?.total || 0, resolved: summary?.resolved || 0,
-        won: summary?.won || 0, lost: summary?.lost || 0,
-        accuracyAll: summary?.accuracy_all || null, accuracy7d: summary?.accuracy_7d || null, accuracy30d: summary?.accuracy_30d || null,
-        recentResults: (recent || []).map(p => ({ home: p.home, away: p.away, predicted: p.result, actual: p.actual_result, status: p.status, confidence: p.confidence, date: p.date, sport: p.sport }))
-      });
-    } else {
-      const all = memPredictions;
+      const { data: recent } = await supabase.from("predictions").select("home,away,result,actual_result,status,confidence,date,sport").neq("status", "pending").order("created_at", { ascending: false }).limit(20);
+      const all = (await supabase.from("predictions").select("status")).data || [];
       const resolved = all.filter(p => p.status !== "pending");
       const won = resolved.filter(p => p.status === "won");
-      res.json({ total: all.length, resolved: resolved.length, won: won.length, lost: resolved.length - won.length, accuracyAll: resolved.length ? Math.round(won.length / resolved.length * 100) : null, accuracy7d: null, accuracy30d: null, recentResults: resolved.slice(-20).reverse().map(p => ({ home: p.home, away: p.away, predicted: p.result, status: p.status, confidence: p.confidence, date: p.date, sport: p.sport })) });
+      res.json({ total: all.length, resolved: resolved.length, won: won.length, lost: resolved.length - won.length, accuracyAll: resolved.length ? Math.round(won.length / resolved.length * 100) : null, recentResults: (recent || []) });
+    } else {
+      const resolved = memPredictions.filter(p => p.status !== "pending");
+      const won = resolved.filter(p => p.status === "won");
+      res.json({ total: memPredictions.length, resolved: resolved.length, won: won.length, lost: resolved.length - won.length, accuracyAll: resolved.length ? Math.round(won.length / resolved.length * 100) : null, recentResults: resolved.slice(-20).reverse() });
     }
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── AUTO CHECK RESULTS ─────────────────────────────────────────────────────
-async function checkResults() {
-  try {
-    const pending = SUPABASE_ENABLED
-      ? (await supabase.from("predictions").select("*").eq("status", "pending").eq("sport", "football").not("match_id", "is", null)).data || []
-      : memPredictions.filter(p => p.status === "pending" && p.sport === "football" && p.match_id);
-    for (const pred of pending) {
-      try {
-        if (Date.now() - new Date(pred.date).getTime() < 2*60*60*1000) continue;
-        const r = await fetch("https://api.football-data.org/v4/matches/" + (pred.match_id || pred.matchId), { headers: FKEY() });
-        const m = await r.json();
-        if (m.status !== "FINISHED") continue;
-        const hs = m.score?.fullTime?.home;
-        const as2 = m.score?.fullTime?.away;
-        if (hs === null || hs === undefined) continue;
-        const actual = hs > as2 ? "Home Win" : as2 > hs ? "Away Win" : "Draw";
-        const won = pred.result === actual;
-        if (SUPABASE_ENABLED) {
-          await supabase.from("predictions").update({ status: won ? "won" : "lost", actual_result: actual, actual_score: hs + "-" + as2, resolved_at: new Date().toISOString() }).eq("id", pred.id);
-        } else {
-          pred.status = won ? "won" : "lost";
-          pred.actual_result = actual;
-        }
-      } catch {}
-    }
-  } catch(e) { console.error("Result check error:", e.message); }
-}
-setInterval(checkResults, 2*60*60*1000);
-setTimeout(checkResults, 60*1000);
-
-// ── PREDICTION OF THE DAY ──────────────────────────────────────────────────
+// ── PREDICTION OF DAY ──────────────────────────────────────────────────────
 app.get("/prediction-of-day", async (req, res) => {
+  const cached = getCache("potd");
+  if (cached) return res.json(cached);
   try {
-    const today = new Date();
-    const from = today.toISOString().split("T")[0];
-    const to = new Date(today.getTime() + 3*24*60*60*1000).toISOString().split("T")[0];
     const fixtures = [];
     for (const id of ["PL", "PD", "BL1", "SA", "FL1"]) {
-      try {
-        const r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/matches?status=SCHEDULED&dateFrom=" + from + "&dateTo=" + to, { headers: FKEY() });
-        const d = await r.json();
-        if (d.matches?.length) {
-          const f = d.matches[0];
-          fixtures.push({ compId: id, compName: COMPS[id].name, homeId: f.homeTeam.id, awayId: f.awayTeam.id, home: f.homeTeam.name, away: f.awayTeam.name, homeCrest: f.homeTeam.crest, awayCrest: f.awayTeam.crest, date: f.utcDate });
-        }
-      } catch {}
+      const league = AF_LEAGUES[id];
+      const today = new Date().toISOString().split("T")[0];
+      const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const data = await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      if (data.length) {
+        const f = data[0];
+        fixtures.push({ compId: id, compName: league.name, homeId: f.teams?.home?.id, awayId: f.teams?.away?.id, home: f.teams?.home?.name, away: f.teams?.away?.name, homeCrest: f.teams?.home?.logo, awayCrest: f.teams?.away?.logo, date: f.fixture?.date });
+      }
     }
     if (!fixtures.length) return res.json(null);
     const preds = await Promise.all(fixtures.map(async f => {
       try { return { ...f, prediction: await predictFootball(f.home, f.away, f.homeId, f.awayId, f.compId) }; }
       catch { return null; }
     }));
-    const valid = preds.filter(Boolean);
-    valid.sort((a, b) => b.prediction.result_confidence - a.prediction.result_confidence);
-    res.json(valid[0] || null);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const valid = preds.filter(Boolean).sort((a, b) => b.prediction.result_confidence - a.prediction.result_confidence);
+    const potd = valid[0] || null;
+    setCache("potd", potd, 6 * 60 * 60 * 1000);
+    res.json(potd);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── PARLAYS ────────────────────────────────────────────────────────────────
 app.get("/parlays", async (req, res) => {
+  const cached = getCache("parlays");
+  if (cached) return res.json(cached);
   try {
-    const today = new Date();
-    const from = today.toISOString().split("T")[0];
-    const to = new Date(today.getTime() + 2*24*60*60*1000).toISOString().split("T")[0];
     const allFx = [];
     for (const id of ["PL", "PD", "BL1", "SA", "FL1", "DED", "PPL"]) {
-      try {
-        const r = await fetch("https://api.football-data.org/v4/competitions/" + id + "/matches?status=SCHEDULED&dateFrom=" + from + "&dateTo=" + to, { headers: FKEY() });
-        const d = await r.json();
-        (d.matches || []).slice(0, 3).forEach(m => allFx.push({ compId: id, compName: COMPS[id].name, flag: COMPS[id].flag, homeId: m.homeTeam.id, awayId: m.awayTeam.id, home: m.homeTeam.name, away: m.awayTeam.name, homeCrest: m.homeTeam.crest, awayCrest: m.awayTeam.crest, date: m.utcDate }));
-      } catch {}
+      const league = AF_LEAGUES[id];
+      const today = new Date().toISOString().split("T")[0];
+      const future = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const data = await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      data.slice(0, 2).forEach(f => allFx.push({ compId: id, compName: league.name, flag: league.flag, homeId: f.teams?.home?.id, awayId: f.teams?.away?.id, home: f.teams?.home?.name, away: f.teams?.away?.name, homeCrest: f.teams?.home?.logo, awayCrest: f.teams?.away?.logo, date: f.fixture?.date }));
     }
-    if (allFx.length < 3) return res.json({ safe: null, medium: null, highRisk: null, generatedAt: new Date().toISOString() });
+    if (allFx.length < 3) return res.json({ safe: null, medium: null, highRisk: null });
     const preds = await Promise.all(allFx.slice(0, 8).map(async f => {
-      try { const p = await predictFootball(f.home, f.away, f.homeId, f.awayId, f.compId); return { ...f, prediction: p }; }
+      try { return { ...f, prediction: await predictFootball(f.home, f.away, f.homeId, f.awayId, f.compId) }; }
       catch { return null; }
     }));
-    const valid = preds.filter(p => p && !p.prediction?.error);
-    valid.sort((a, b) => b.prediction.result_confidence - a.prediction.result_confidence);
-    const buildSlip = (picks, label, riskColor, emoji) => {
+    const valid = preds.filter(Boolean).sort((a, b) => b.prediction.result_confidence - a.prediction.result_confidence);
+    const buildSlip = (picks, label, emoji) => {
       if (!picks.length) return null;
       const totalOdds = picks.reduce((acc, p) => acc * parseFloat((100 / p.prediction.result_confidence).toFixed(2)), 1).toFixed(2);
-      return {
-        label, emoji, riskColor,
-        picks: picks.map(p => ({ home: p.home, away: p.away, flag: p.flag, compName: p.compName, homeCrest: p.homeCrest, awayCrest: p.awayCrest, date: p.date, result: p.prediction.result, confidence: p.prediction.result_confidence, score: p.prediction.score, odds: parseFloat((100 / p.prediction.result_confidence).toFixed(2)) })),
-        totalOdds,
-        combinedConf: Math.round(picks.reduce((a, p) => a * (p.prediction.result_confidence / 100), 1) * 100)
-      };
+      return { label, emoji, picks: picks.map(p => ({ home: p.home, away: p.away, flag: p.flag, compName: p.compName, homeCrest: p.homeCrest, awayCrest: p.awayCrest, date: p.date, result: p.prediction.result, confidence: p.prediction.result_confidence, score: p.prediction.score, odds: parseFloat((100 / p.prediction.result_confidence).toFixed(2)) })), totalOdds, combinedConf: Math.round(picks.reduce((a, p) => a * (p.prediction.result_confidence / 100), 1) * 100) };
     };
-    res.json({
-      safe: buildSlip(valid.slice(0, 3).filter(p => p.prediction.result_confidence >= 60), "Safe Parlay", "#16a34a", "🔒"),
-      medium: buildSlip(valid.slice(0, 5), "Value Parlay", "#f59e0b", "🎯"),
-      highRisk: buildSlip(valid.slice(0, 7), "High Risk Parlay", "#dc2626", "💣"),
-      generatedAt: new Date().toISOString()
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const result = { safe: buildSlip(valid.filter(p => p.prediction.result_confidence >= 60).slice(0, 3), "Safe Parlay", "🔒"), medium: buildSlip(valid.slice(0, 5), "Value Parlay", "🎯"), highRisk: buildSlip(valid.slice(0, 7), "High Risk Parlay", "💣"), generatedAt: new Date().toISOString() };
+    setCache("parlays", result, 3 * 60 * 60 * 1000);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── BLOG ───────────────────────────────────────────────────────────────────
 app.post("/blog/generate", async (req, res) => {
   const { home, away, compName, date, prediction } = req.body;
   if (!home || !away) return res.status(400).json({ error: "Missing match data" });
-  if (!SUPABASE_ENABLED) return res.json({ success: false, message: "Blog requires Supabase" });
-  const cleanHome = home.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const cleanAway = away.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const dateStr = new Date(date || Date.now()).toISOString().split("T")[0];
-  const slug = cleanHome + "-vs-" + cleanAway + "-prediction-" + dateStr;
+  if (!SUPABASE_ENABLED) return res.json({ success: false });
+  const slug = home.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-vs-" + away.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-prediction-" + new Date(date || Date.now()).toISOString().split("T")[0];
   try {
     const existing = await supabase.from("blog_posts").select("slug").eq("slug", slug).single();
     if (existing.data) return res.json({ success: true, slug, existing: true });
     const matchDate = new Date(date || Date.now()).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
     const predText = (prediction?.result || "Home Win") + " with " + (prediction?.result_confidence || 70) + "% confidence" + (prediction?.score ? ", predicted score " + prediction.score : "");
-    const sys = "You are an SEO football prediction writer. Write engaging 300-400 word match preview articles optimized for Google. Write in plain paragraphs, no markdown headers.";
-    const msg = "Write an SEO match prediction article for: " + home + " vs " + away + " (" + (compName || "Football") + ") on " + matchDate + ". AI prediction: " + predText + ". Include both teams analysis and end with a call to action for scoutaibot.com";
-    const content = await callClaude(sys, msg);
+    const sys = "You are an expert SEO football prediction writer. Write engaging 350-450 word match preview articles. Use plain paragraphs only, no markdown headers or bullet points. Write naturally like a sports journalist.";
+    const content = await callClaude(sys, "Write an SEO match prediction article for: " + home + " vs " + away + " (" + (compName || "Football") + ") on " + matchDate + ". AI prediction: " + predText + ". Analyze both teams form, key players, and end with a call to action to visit scoutaibot.com for more predictions.", 800);
     const title = home + " vs " + away + " Prediction & Preview — " + (compName || "Football");
-    await supabase.from("blog_posts").insert({ slug, title, content: typeof content === "string" ? content : JSON.stringify(content), home, away, match_date: date, published: true });
+    await supabase.from("blog_posts").insert({ slug, title, content: typeof content === "string" ? content : JSON.stringify(content), home, away, match_date: date, published: true, likes: 0 });
     res.json({ success: true, slug, title });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/blog", async (req, res) => {
   if (!SUPABASE_ENABLED) return res.json([]);
   try {
-    const { data } = await supabase.from("blog_posts").select("slug,title,home,away,match_date,created_at,likes").eq("published", true).order("created_at", { ascending: false }).limit(30);
+    const { data } = await supabase.from("blog_posts").select("slug,title,home,away,match_date,created_at,likes").eq("published", true).order("created_at", { ascending: false }).limit(50);
     res.json(data || []);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/blog/:slug", async (req, res) => {
-  if (!SUPABASE_ENABLED) return res.status(404).json({ error: "Blog not available" });
+  if (!SUPABASE_ENABLED) return res.status(404).json({ error: "Not found" });
   try {
     const { data } = await supabase.from("blog_posts").select("*").eq("slug", req.params.slug).single();
     if (!data) return res.status(404).json({ error: "Post not found" });
     res.json(data);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/blog/:slug/like", async (req, res) => {
@@ -599,7 +586,7 @@ app.post("/blog/:slug/like", async (req, res) => {
     const newLikes = (post?.likes || 0) + 1;
     await supabase.from("blog_posts").update({ likes: newLikes }).eq("slug", req.params.slug);
     res.json({ likes: newLikes });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/blog/:slug/comments", async (req, res) => {
@@ -607,32 +594,62 @@ app.get("/blog/:slug/comments", async (req, res) => {
   try {
     const { data } = await supabase.from("blog_comments").select("*").eq("slug", req.params.slug).order("created_at", { ascending: false }).limit(50);
     res.json(data || []);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/blog/:slug/comment", async (req, res) => {
   const { name, comment } = req.body;
   if (!name || !comment) return res.status(400).json({ error: "Name and comment required" });
-  if (!SUPABASE_ENABLED) return res.status(503).json({ error: "Comments require database" });
+  if (!SUPABASE_ENABLED) return res.status(503).json({ error: "Requires database" });
   try {
     const { data, error } = await supabase.from("blog_comments").insert({ slug: req.params.slug, name: name.substring(0, 50), comment: comment.substring(0, 500) }).select().single();
     if (error) throw error;
     res.json({ success: true, comment: data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── AUTO DAILY BLOG ────────────────────────────────────────────────────────
+async function autoBlog() {
+  if (!SUPABASE_ENABLED) return;
+  console.log("Auto blog: generating posts...");
+  let count = 0;
+  for (const id of ["PL", "PD", "BL1", "SA", "FL1", "DED", "PPL", "CL"]) {
+    if (count >= 10) break;
+    try {
+      const league = AF_LEAGUES[id];
+      const today = new Date().toISOString().split("T")[0];
+      const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const data = await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      for (const f of data.slice(0, 2)) {
+        if (count >= 10) break;
+        const home = f.teams?.home?.name, away = f.teams?.away?.name;
+        const slug = home.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-vs-" + away.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-prediction-" + today;
+        const existing = await supabase.from("blog_posts").select("slug").eq("slug", slug).single();
+        if (!existing.data) {
+          try {
+            const pred = await predictFootball(home, away, f.teams?.home?.id, f.teams?.away?.id, id);
+            const predText = pred.result + " with " + pred.result_confidence + "% confidence" + (pred.score ? ", predicted score " + pred.score : "");
+            const sys = "You are an expert SEO football prediction writer. Write engaging 350-450 word match preview articles. Plain paragraphs only, no markdown.";
+            const content = await callClaude(sys, "Write an SEO match prediction article for: " + home + " vs " + away + " (" + league.name + ") today. AI prediction: " + predText + ". Include team analysis and end with a call to action for scoutaibot.com", 800);
+            const title = home + " vs " + away + " Prediction & Preview — " + league.name;
+            await supabase.from("blog_posts").insert({ slug, title, content: typeof content === "string" ? content : JSON.stringify(content), home, away, match_date: new Date().toISOString(), published: true, likes: 0 });
+            count++;
+            await new Promise(r => setTimeout(r, 2000));
+          } catch (e) { console.error("Blog gen error:", e.message); }
+        }
+      }
+    } catch (e) { console.error("Auto blog league error:", e.message); }
+  }
+  console.log("Auto blog done: " + count + " posts generated");
+}
 
 // ── CONTACT ────────────────────────────────────────────────────────────────
 app.post("/contact", async (req, res) => {
   const { name, email, company, message, type } = req.body;
   if (!name || !email || !message) return res.status(400).json({ error: "Required fields missing" });
   try {
-    await resend.emails.send({
-      from: "ScoutAI <onboarding@resend.dev>",
-      to: process.env.OWNER_EMAIL || "owner@example.com",
-      subject: "New Enquiry from " + name,
-      html: "<h2>ScoutAI Enquiry</h2><p><b>Name:</b> " + name + "</p><p><b>Email:</b> " + email + "</p><p><b>Company:</b> " + (company || "N/A") + "</p><p><b>Type:</b> " + (type || "") + "</p><p><b>Message:</b> " + message + "</p>"
-    });
-  } catch(e) { console.error("Email error:", e.message); }
+    await resend.emails.send({ from: "ScoutAI <onboarding@resend.dev>", to: process.env.OWNER_EMAIL || "owner@example.com", subject: "New Enquiry from " + name, html: "<h2>ScoutAI Enquiry</h2><p><b>Name:</b> " + name + "</p><p><b>Email:</b> " + email + "</p><p><b>Company:</b> " + (company || "N/A") + "</p><p><b>Type:</b> " + (type || "") + "</p><p><b>Message:</b> " + message + "</p>" });
+  } catch (e) { console.error("Email:", e.message); }
   res.json({ success: true, message: "Message received! We will reply within 24 hours." });
 });
 
@@ -641,14 +658,17 @@ app.post("/subscribe", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required" });
   try {
-    if (SUPABASE_ENABLED) {
-      await supabase.from("subscribers").upsert({ email }, { onConflict: "email", ignoreDuplicates: true });
-    } else {
-      if (!memSubs.find(s => s.email === email)) memSubs.push({ email, created_at: new Date().toISOString() });
-    }
-    try { await resend.emails.send({ from: "ScoutAI <onboarding@resend.dev>", to: process.env.OWNER_EMAIL || "owner@example.com", subject: "New ScoutAI Subscriber", html: "<p>New subscriber: <b>" + email + "</b></p>" }); } catch {}
+    if (SUPABASE_ENABLED) await supabase.from("subscribers").upsert({ email }, { onConflict: "email", ignoreDuplicates: true });
+    else if (!memSubs.find(s => s.email === email)) memSubs.push({ email });
     res.json({ success: true, message: "Subscribed! Daily predictions coming your way." });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ACCURACY ───────────────────────────────────────────────────────────────
+app.get("/accuracy", (req, res) => {
+  const resolved = memPredictions.filter(p => p.status !== "pending");
+  const won = resolved.filter(p => p.status === "won").length;
+  res.json({ total: memPredictions.length, correct: won, accuracy: resolved.length ? Math.round(won / resolved.length * 100) : null });
 });
 
 // ── DAILY CRON ─────────────────────────────────────────────────────────────
@@ -656,30 +676,63 @@ app.get("/cron/daily", async (req, res) => {
   const secret = req.headers["x-cron-secret"] || req.query.secret;
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error: "Unauthorized" });
   const results = { errors: [] };
-  try { await checkResults(); results.resultsChecked = true; } catch(e) { results.errors.push("Results: " + e.message); }
-  try {
-    const potdRes = await fetch("https://scoutai-server.onrender.com/prediction-of-day");
-    results.potd = await potdRes.json();
-    const subs = SUPABASE_ENABLED ? (await supabase.from("subscribers").select("email")).data || [] : memSubs;
-    if (subs.length && results.potd && process.env.RESEND_API_KEY) {
-      const potd = results.potd;
-      const subject = "Today's Best Bet: " + potd.home + " vs " + potd.away + " — ScoutAI";
-      const html = "<h2>ScoutAI Daily Pick</h2><h3>" + potd.home + " vs " + potd.away + "</h3><p><b>Prediction:</b> " + (potd.prediction?.result || "") + "</p><p><b>Confidence:</b> " + (potd.prediction?.result_confidence || 0) + "%</p><p>" + (potd.prediction?.reasoning || "") + "</p><p><a href='" + (process.env.SITE_URL || "https://scoutaibot.com") + "'>View all predictions</a></p>";
-      let sent = 0;
-      for (const sub of subs) {
-        try { await resend.emails.send({ from: "ScoutAI Daily Picks <onboarding@resend.dev>", to: sub.email, subject, html }); sent++; } catch {}
-      }
-      results.emailsSent = sent;
-    }
-  } catch(e) { results.errors.push("POTD/email: " + e.message); }
+  try { await autoBlog(); results.blogGenerated = true; } catch (e) { results.errors.push("Blog: " + e.message); }
   res.json({ success: true, timestamp: new Date().toISOString(), ...results });
 });
 
-app.get("/accuracy", (req, res) => {
-  const all = memPredictions.filter(p => p.status !== "pending");
-  const won = all.filter(p => p.status === "won").length;
-  res.json({ total: memPredictions.length, correct: won, accuracy: all.length ? Math.round(won / all.length * 100) : null });
-});
+// ── KEEP ALIVE ─────────────────────────────────────────────────────────────
+app.get("/ping", (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-app.get("/", (req, res) => res.send("ScoutAI Server v3.0 OK"));
+// Self-ping every 5 minutes to stay warm
+setInterval(async () => {
+  try {
+    await fetch("https://scoutai-server.onrender.com/ping");
+  } catch {}
+}, 5 * 60 * 1000);
+
+// Auto-refresh top league caches every 3 hours
+setInterval(async () => {
+  console.log("Cache refresh: updating top leagues...");
+  for (const id of ["PL", "PD", "BL1", "SA", "FL1"]) {
+    try {
+      const league = AF_LEAGUES[id];
+      const today = new Date().toISOString().split("T")[0];
+      const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      delete cache["fixtures_" + id];
+      await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      await new Promise(r => setTimeout(r, 1500));
+    } catch (e) { console.error("Cache refresh error:", id, e.message); }
+  }
+}, 3 * 60 * 60 * 1000);
+
+// Run auto blog at 8am daily
+function scheduleDailyBlog() {
+  const now = new Date();
+  const next8am = new Date(now);
+  next8am.setHours(8, 0, 0, 0);
+  if (next8am <= now) next8am.setDate(next8am.getDate() + 1);
+  const ms = next8am - now;
+  setTimeout(async () => {
+    await autoBlog();
+    setInterval(autoBlog, 24 * 60 * 60 * 1000);
+  }, ms);
+}
+scheduleDailyBlog();
+
+// Initial cache warm-up on server start
+setTimeout(async () => {
+  console.log("Warming up cache...");
+  for (const id of ["PL", "PD", "BL1", "SA", "FL1"]) {
+    try {
+      const league = AF_LEAGUES[id];
+      const today = new Date().toISOString().split("T")[0];
+      const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      await afGet("/fixtures?league=" + league.id + "&season=" + league.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      await new Promise(r => setTimeout(r, 1500));
+    } catch (e) { console.error("Warmup error:", e.message); }
+  }
+  console.log("Cache warm-up done");
+}, 5000);
+
+app.get("/", (req, res) => res.send("ScoutAI Server v4.0 — Always On"));
 app.listen(PORT, () => console.log("ScoutAI on port " + PORT));
