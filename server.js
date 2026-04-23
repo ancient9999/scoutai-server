@@ -722,7 +722,10 @@ app.post("/blog/generate", async (req, res) => {
 app.get("/blog", async (req, res) => {
   if (!SUPABASE_ENABLED) return res.json([]);
   try {
-    const { data } = await supabase.from("blog_posts").select("slug,title,home,away,match_date,created_at,likes,league,prediction,confidence").eq("published",true).order("created_at",{ascending:false}).limit(50);
+    const { data } = await supabase.from("blog_posts")
+      .select("slug,title,home,away,match_date,created_at,likes")
+      .order("created_at",{ascending:false})
+      .limit(50);
     res.json(data||[]);
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -802,8 +805,9 @@ async function autoBlog() {
   if (!SUPABASE_ENABLED) return;
   console.log("Auto blog: starting...");
   let count = 0;
+  // Blog runs at midnight CET — write previews for today and tomorrow's matches only
   const today = new Date().toISOString().split("T")[0];
-  const future = new Date(Date.now()+4*24*60*60*1000).toISOString().split("T")[0];
+  const tomorrow = new Date(Date.now()+1*24*60*60*1000).toISOString().split("T")[0];
 
   // Top European leagues + cups for blog
   const blogLeagues = ["PL","PD","BL1","SA","FL1","CL","EL","UECL","FAC","CDR","DFB","CPI"];
@@ -813,7 +817,7 @@ async function autoBlog() {
     try {
       const lg = LEAGUES[id];
       if (!lg) continue;
-      const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&from=" + today + "&to=" + tomorrow + "&status=NS-PST");
       if (!data || !data.length) continue;
 
       for (const f of data.slice(0,2)) {
@@ -849,12 +853,9 @@ async function autoBlog() {
             slug,
             title,
             content,
-            meta_description: metaDesc,
             home,
             away,
-            comp_id: id,
             match_date: f.fixture?.date || new Date().toISOString(),
-            published: true,
             likes: 0
           });
 
