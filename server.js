@@ -436,16 +436,29 @@ app.get("/seo/:compId", async (req, res) => {
 });
 
 // ── AI HELPERS ─────────────────────────────────────────────────────────────
-async function callClaude(sys, msg, maxTokens) {
+async function callClaude(sys, msg, maxTokens, model) {
+  const m = model || "claude-sonnet-4-6";
   const r = await fetchRetry("https://api.anthropic.com/v1/messages", {
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
-    body:JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:maxTokens||1200, system:sys, messages:[{role:"user",content:msg}] })
+    body:JSON.stringify({ model:m, max_tokens:maxTokens||1200, system:sys, messages:[{role:"user",content:msg}] })
   });
   const d = await r.json();
   if (d.error) throw new Error(d.error.message);
   const text = (d.content||[]).map(c=>c.text||"").join("");
   return JSON.parse(text.replace(/```json|```/g,"").trim());
+}
+
+async function callClaudeText(sys, msg, maxTokens, model) {
+  const m = model || "claude-opus-4-5";
+  const r = await fetchRetry("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
+    body:JSON.stringify({ model:m, max_tokens:maxTokens||2000, system:sys, messages:[{role:"user",content:msg}] })
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error.message);
+  return (d.content||[]).map(c=>c.text||"").join("");
 }
 
 async function predictFootball(home, away, compId) {
@@ -620,7 +633,7 @@ app.post("/blog/generate", async (req, res) => {
 app.get("/blog", async (req, res) => {
   if (!SUPABASE_ENABLED) return res.json([]);
   try {
-    const { data } = await supabase.from("blog_posts").select("slug,title,home,away,match_date,created_at,likes").eq("published",true).order("created_at",{ascending:false}).limit(50);
+    const { data } = await supabase.from("blog_posts").select("slug,title,home,away,match_date,created_at,likes,league,prediction,confidence").eq("published",true).order("created_at",{ascending:false}).limit(50);
     res.json(data||[]);
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -664,35 +677,104 @@ app.post("/blog/:slug/comment", async (req, res) => {
 });
 
 // ── AUTO BLOG GENERATION ───────────────────────────────────────────────────
+async function generateBlogArticle(home, away, lgName, lgId, fixtureId, pred, form) {
+  const predText = pred.result + " with " + pred.result_confidence + "% confidence" + (pred.score ? ", predicted score " + pred.score : "");
+  const homeForm = form?.homeForm || "Unknown";
+  const awayForm = form?.awayForm || "Unknown";
+
+  const sys = `You are an expert football journalist and SEO writer for ScoutAI (scoutaibot.com), an AI-powered football prediction platform.
+Write a detailed, human-sounding match preview article. It must be 650-800 words.
+Structure it with these exact HTML-friendly markdown headings:
+## Match Overview
+## Team Form & Recent Results  
+## Head-to-Head Analysis
+## AI Prediction & Betting Insight
+## Final Verdict
+
+Rules:
+- Sound like a real sports journalist, not generic AI
+- Include specific details about the teams, league position context
+- Reference the AI prediction naturally in the article
+- End with a call to visit scoutaibot.com for more predictions
+- No placeholder text, no [brackets], no made-up statistics
+- SEO optimized — use team names and league name naturally throughout
+- Do NOT use JSON, return plain text article only`;
+
+  const msg = `Write a match preview for: ${home} vs ${away} (${lgName})
+AI Prediction: ${predText}
+${home} recent form: ${homeForm}
+${away} recent form: ${awayForm}
+This is for the ${lgName} competition. Make it engaging and informative for football betting enthusiasts.`;
+
+  return await callClaudeText(sys, msg, 1800, "claude-opus-4-5");
+}
+
 async function autoBlog() {
   if (!SUPABASE_ENABLED) return;
   console.log("Auto blog: starting...");
   let count = 0;
   const today = new Date().toISOString().split("T")[0];
-  const future = new Date(Date.now()+3*24*60*60*1000).toISOString().split("T")[0];
-  for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","CL"]) {
-    if (count >= 10) break;
+  const future = new Date(Date.now()+4*24*60*60*1000).toISOString().split("T")[0];
+
+  // Top European leagues + cups for blog
+  const blogLeagues = ["PL","PD","BL1","SA","FL1","CL","EL","UECL","FAC","CDR","DFB","CPI"];
+
+  for (const id of blogLeagues) {
+    if (count >= 8) break;
     try {
       const lg = LEAGUES[id];
+      if (!lg) continue;
       const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
+      if (!data || !data.length) continue;
+
       for (const f of data.slice(0,2)) {
-        if (count >= 10) break;
-        const home = f.teams?.home?.name, away = f.teams?.away?.name;
+        if (count >= 8) break;
+        const home = f.teams?.home?.name;
+        const away = f.teams?.away?.name;
+        if (!home || !away) continue;
+
         const slug = home.toLowerCase().replace(/[^a-z0-9]+/g,"-") + "-vs-" + away.toLowerCase().replace(/[^a-z0-9]+/g,"-") + "-" + today;
         const existing = await supabase.from("blog_posts").select("slug").eq("slug",slug).single();
-        if (!existing.data) {
+        if (existing.data) continue;
+
+        try {
+          // Get real fixture data for context
+          const fixtureId = f.fixture?.id;
+          let homeForm = "", awayForm = "";
           try {
-            const pred = await predictFootball(home, away, id);
-            const predText = pred.result + " with " + pred.result_confidence + "% confidence" + (pred.score?", score "+pred.score:"");
-            const sys = "Expert football journalist writing SEO match preview articles. 350-400 words. Plain paragraphs only.";
-            const content = await callClaude(sys, "Write a match prediction article for: " + home + " vs " + away + " (" + lg.name + "). AI prediction: " + predText + ". Include analysis and call to action for scoutaibot.com", 800);
-            await supabase.from("blog_posts").insert({ slug, title:home+" vs "+away+" Prediction — "+lg.name, content:typeof content==="string"?content:JSON.stringify(content), home, away, match_date:new Date().toISOString(), published:true, likes:0 });
-            count++;
-            await new Promise(r => setTimeout(r, 3000));
-          } catch(e) { console.error("Blog gen error:", e.message); }
-        }
+            const homeStats = await afGet("/teams/statistics?league=" + lg.id + "&season=" + lg.season + "&team=" + f.teams.home.id);
+            const awayStats = await afGet("/teams/statistics?league=" + lg.id + "&season=" + lg.season + "&team=" + f.teams.away.id);
+            const hf = homeStats?.form || "";
+            const af = awayStats?.form || "";
+            homeForm = hf.slice(-5).split("").join(", ") + " (last 5)";
+            awayForm = af.slice(-5).split("").join(", ") + " (last 5)";
+          } catch(e) {}
+
+          const pred = await predictFootball(home, away, id);
+          const content = await generateBlogArticle(home, away, lg.name, id, fixtureId, pred, { homeForm, awayForm });
+
+          const title = home + " vs " + away + " Prediction & Preview — " + lg.name + " | ScoutAI";
+          const metaDesc = "AI-powered " + home + " vs " + away + " prediction for " + lg.name + ". " + pred.result + " with " + pred.result_confidence + "% confidence. Full analysis on ScoutAI.";
+
+          await supabase.from("blog_posts").insert({
+            slug,
+            title,
+            content,
+            meta_description: metaDesc,
+            home,
+            away,
+            comp_id: id,
+            match_date: f.fixture?.date || new Date().toISOString(),
+            published: true,
+            likes: 0
+          });
+
+          count++;
+          console.log("Blog generated: " + home + " vs " + away);
+          await new Promise(r => setTimeout(r, 4000)); // Rate limit pause
+        } catch(e) { console.error("Blog gen error:", home + " vs " + away, e.message); }
       }
-    } catch(e) { console.error("Blog league error:", e.message); }
+    } catch(e) { console.error("Blog league error:", id, e.message); }
   }
   console.log("Auto blog done: " + count + " posts");
 }
@@ -810,22 +892,32 @@ app.get("/ping", (req, res) => res.json({ ok:true, ts:Date.now() }));
 // Keep alive ping
 setInterval(async () => { try { await fetch("https://scoutai-server.onrender.com/ping"); } catch {} }, 5*60*1000);
 
-// Resolve predictions every 2 hours
-setInterval(async () => { try { await resolvePredictions(); } catch(e) {} }, 2*60*60*1000);
-// Also resolve on startup after 30 seconds
+// Resolve predictions on startup after 30 seconds
 setTimeout(async () => { try { await resolvePredictions(); } catch(e) {} }, 30000);
 
-// Schedule daily blog - check every hour if it's 8am
-// More resilient to server restarts than a single setTimeout
+// Check every hour for scheduled tasks
+// Midnight CET (UTC+1 winter / UTC+2 summer) = 23:00 UTC winter / 22:00 UTC summer
+// We check for both to handle daylight saving
 let lastBlogDate = null;
+let lastResolveDate = null;
 setInterval(async () => {
   const now = new Date();
+  const utcHour = now.getUTCHours();
   const today = now.toISOString().split("T")[0];
-  const hour = now.getHours();
-  if (hour === 8 && lastBlogDate !== today) {
+
+  // Midnight CET = 23:00 UTC (winter) or 22:00 UTC (summer) — run blog generation
+  if ((utcHour === 23 || utcHour === 22) && lastBlogDate !== today) {
     lastBlogDate = today;
-    console.log("Hourly check: 8am detected, running autoBlog...");
+    console.log("Midnight CET: running autoBlog...");
     try { await autoBlog(); } catch(e) { console.error("Scheduled blog error:", e.message); }
+  }
+
+  // 11pm CET = 22:00 UTC (winter) or 21:00 UTC (summer) — run resolution after all European games finish
+  const yesterday = new Date(now - 24*60*60*1000).toISOString().split("T")[0];
+  if ((utcHour === 22 || utcHour === 21) && lastResolveDate !== today) {
+    lastResolveDate = today;
+    console.log("11pm CET: running resolvePredictions...");
+    try { await resolvePredictions(); } catch(e) { console.error("Scheduled resolve error:", e.message); }
   }
 }, 60*60*1000); // check every hour
 
