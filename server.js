@@ -537,13 +537,44 @@ app.get("/performance", async (req, res) => {
         bySport[sp].total++;
         if (p.status==="won") bySport[sp].won++;
       });
+      // Only use parlay picks for performance (AI-selected, not user clicks)
+      const parlayPreds = preds.filter(p => p.parlay_type);
+      const parlayResolved = parlayPreds.filter(p => p.status !== "pending");
+      const parlayWon = parlayResolved.filter(p => p.status === "won");
+
+      // Breakdown by parlay type
+      const byParlayType = { safe:{won:0,total:0}, value:{won:0,total:0}, risk:{won:0,total:0} };
+      parlayResolved.forEach(p => {
+        const t = p.parlay_type || "value";
+        if (!byParlayType[t]) byParlayType[t] = {won:0,total:0};
+        byParlayType[t].total++;
+        if (p.status==="won") byParlayType[t].won++;
+      });
+
+      // By league (parlay picks only)
+      const byLeagueParlays = {};
+      parlayResolved.forEach(p => {
+        const lg = p.comp_id||"unknown";
+        if (!byLeagueParlays[lg]) byLeagueParlays[lg] = { won:0, total:0 };
+        byLeagueParlays[lg].total++;
+        if (p.status==="won") byLeagueParlays[lg].won++;
+      });
+
       res.json({
-        total: preds.length, resolved: resolved.length,
-        won: won.length, lost: resolved.length-won.length,
-        accuracyAll: resolved.length ? Math.round(won.length/resolved.length*100) : null,
-        byLeague: Object.entries(byLeague).map(([id,s])=>({ id, name:LEAGUES[id]?.name||id, won:s.won, total:s.total, accuracy:Math.round(s.won/s.total*100) })).sort((a,b)=>b.total-a.total),
-        bySport: Object.entries(bySport).map(([sport,s])=>({ sport, won:s.won, total:s.total, accuracy:Math.round(s.won/s.total*100) })),
-        recentResults: preds.filter(p=>p.status!=="pending").slice(0,20).map(p=>({ home:p.home, away:p.away, predicted:p.result, actual:p.actual_result, status:p.status, confidence:p.confidence, date:p.date, sport:p.sport, compId:p.comp_id })),
+        total: parlayPreds.length,
+        resolved: parlayResolved.length,
+        won: parlayWon.length,
+        lost: parlayResolved.length - parlayWon.length,
+        accuracyAll: parlayResolved.length ? Math.round(parlayWon.length/parlayResolved.length*100) : null,
+        byParlayType: Object.entries(byParlayType).map(([type,s])=>({ type, won:s.won, total:s.total, accuracy:s.total?Math.round(s.won/s.total*100):null })),
+        byLeague: Object.entries(byLeagueParlays).map(([id,s])=>({ id, name:LEAGUES[id]?.name||id, won:s.won, total:s.total, accuracy:Math.round(s.won/s.total*100) })).sort((a,b)=>b.total-a.total),
+        bySport: [{ sport:"football", won:parlayWon.length, total:parlayResolved.length, accuracy:parlayResolved.length?Math.round(parlayWon.length/parlayResolved.length*100):null }],
+        recentResults: parlayPreds.filter(p=>p.status!=="pending").slice(0,30).map(p=>({
+          home:p.home, away:p.away, predicted:p.result, actual:p.actual_result,
+          predictedScore:p.score, actualScore:p.actual_score,
+          status:p.status, confidence:p.confidence, date:p.date,
+          sport:p.sport, compId:p.comp_id, parlayType:p.parlay_type
+        })),
         streak: getStreakData()
       });
     } else {
@@ -582,32 +613,90 @@ app.get("/prediction-of-day", async (req, res) => {
 });
 
 // ── PARLAYS ────────────────────────────────────────────────────────────────
+async function storeParlayPick(pick, parlayType, fixtureId) {
+  if (!SUPABASE_ENABLED) return;
+  try {
+    const key = "parlay_" + parlayType + "_" + pick.home.replace(/\s+/g,"_") + "_" + pick.away.replace(/\s+/g,"_") + "_" + new Date().toISOString().split("T")[0];
+    const existing = await supabase.from("predictions").select("key").eq("key",key).single();
+    if (existing.data) return; // already stored today
+    await supabase.from("predictions").insert({
+      key,
+      home: pick.home,
+      away: pick.away,
+      comp_id: pick.compId || null,
+      match_id: fixtureId || null,
+      result: pick.result,
+      score: pick.score || null,
+      confidence: pick.confidence,
+      sport: "football",
+      status: "pending",
+      date: pick.date || new Date().toISOString(),
+      parlay_type: parlayType,
+      created_at: new Date().toISOString()
+    });
+  } catch(e) { console.error("storeParlayPick error:", e.message); }
+}
+
 app.get("/parlays", async (req, res) => {
   const cached = getCache("parlays");
   if (cached) return res.json(cached);
   try {
     const today = new Date().toISOString().split("T")[0];
-    const future = new Date(Date.now()+2*24*60*60*1000).toISOString().split("T")[0];
     const allFx = [];
-    for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL"]) {
+    for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","CL","EL"]) {
       try {
         const lg = LEAGUES[id];
-        const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&from=" + today + "&to=" + future + "&status=NS-PST");
-        data.slice(0,2).forEach(f => allFx.push({ compId:id, compName:lg.name, flag:lg.flag, home:f.teams?.home?.name, away:f.teams?.away?.name, homeCrest:f.teams?.home?.logo, awayCrest:f.teams?.away?.logo, date:f.fixture?.date }));
+        // TODAY only - no future dates
+        const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&date=" + today + "&status=NS-PST");
+        data.slice(0,3).forEach(f => allFx.push({
+          compId: id,
+          compName: lg.name,
+          flag: lg.flag,
+          home: f.teams?.home?.name,
+          away: f.teams?.away?.name,
+          homeCrest: f.teams?.home?.logo,
+          awayCrest: f.teams?.away?.logo,
+          date: f.fixture?.date,
+          fixtureId: f.fixture?.id
+        }));
       } catch {}
     }
-    if (allFx.length < 3) return res.json({ safe:null, medium:null, highRisk:null, error:"Not enough fixtures" });
-    const preds = await Promise.all(allFx.slice(0,8).map(async f => {
+    if (allFx.length < 3) return res.json({ safe:null, medium:null, highRisk:null, error:"Not enough fixtures today", generatedAt:new Date().toISOString() });
+
+    const preds = await Promise.all(allFx.slice(0,10).map(async f => {
       try { return { ...f, prediction: await predictFootball(f.home, f.away, f.compId) }; }
       catch { return null; }
     }));
-    const valid = preds.filter(Boolean).sort((a,b)=>b.prediction.result_confidence-a.prediction.result_confidence);
-    const buildSlip = (picks, label, emoji) => {
+
+    const valid = preds.filter(p=>p&&p.prediction&&!p.prediction.error)
+      .sort((a,b)=>b.prediction.result_confidence-a.prediction.result_confidence);
+
+    const buildSlip = (picks, label, emoji, parlayType) => {
       if (!picks.length) return null;
-      const totalOdds = picks.reduce((acc,p)=>acc*parseFloat((100/p.prediction.result_confidence).toFixed(2)),1).toFixed(2);
-      return { label, emoji, picks:picks.map(p=>({ home:p.home, away:p.away, flag:p.flag, compName:p.compName, homeCrest:p.homeCrest, awayCrest:p.awayCrest, date:p.date, result:p.prediction.result, confidence:p.prediction.result_confidence, score:p.prediction.score, odds:parseFloat((100/p.prediction.result_confidence).toFixed(2)) })), totalOdds, combinedConf:Math.round(picks.reduce((a,p)=>a*(p.prediction.result_confidence/100),1)*100) };
+      const mappedPicks = picks.map(p=>({
+        home: p.home, away: p.away, flag: p.flag, compName: p.compName,
+        compId: p.compId, homeCrest: p.homeCrest, awayCrest: p.awayCrest,
+        date: p.date, fixtureId: p.fixtureId,
+        result: p.prediction.result, confidence: p.prediction.result_confidence,
+        score: p.prediction.score, odds: parseFloat((100/p.prediction.result_confidence).toFixed(2))
+      }));
+      const totalOdds = mappedPicks.reduce((acc,p)=>acc*p.odds,1).toFixed(2);
+      const combinedConf = Math.round(mappedPicks.reduce((a,p)=>a*(p.confidence/100),1)*100);
+      // Store each pick for performance tracking
+      mappedPicks.forEach(pick => storeParlayPick(pick, parlayType, pick.fixtureId));
+      return { label, emoji, riskColor: parlayType==="safe"?"#16a34a":parlayType==="value"?"#d97706":"#dc2626", picks:mappedPicks, totalOdds, combinedConf };
     };
-    const result = { safe:buildSlip(valid.filter(p=>p.prediction.result_confidence>=65).slice(0,3),"Safe Parlay","🔒"), medium:buildSlip(valid.slice(0,5),"Value Parlay","🎯"), highRisk:buildSlip(valid.slice(0,7),"High Risk Parlay","💣"), generatedAt:new Date().toISOString() };
+
+    const safePicks = valid.filter(p=>p.prediction.result_confidence>=70).slice(0,3);
+    const valuePicks = valid.filter(p=>p.prediction.result_confidence>=60).slice(0,5);
+    const riskPicks = valid.slice(0,7);
+
+    const result = {
+      safe: buildSlip(safePicks, "Safe Parlay", "🔒", "safe"),
+      medium: buildSlip(valuePicks, "Value Parlay", "🎯", "value"),
+      highRisk: buildSlip(riskPicks, "High Risk Parlay", "💣", "risk"),
+      generatedAt: new Date().toISOString()
+    };
     setCache("parlays", result, 3*60*60*1000);
     res.json(result);
   } catch(e) { res.status(500).json({ error:e.message }); }
@@ -706,7 +795,7 @@ ${home} recent form: ${homeForm}
 ${away} recent form: ${awayForm}
 This is for the ${lgName} competition. Make it engaging and informative for football betting enthusiasts.`;
 
-  return await callClaudeText(sys, msg, 1800, "claude-opus-4-5");
+  return await callClaudeText(sys, msg, 1500, "claude-sonnet-4-6");
 }
 
 async function autoBlog() {
