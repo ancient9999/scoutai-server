@@ -865,8 +865,7 @@ Write an engaging preview that football fans and bettors will find useful.`;
 
           const { error: insertError } = await supabase.from("blog_posts").insert({
             slug, title, content, home, away,
-            match_date: f.fixture?.date || new Date().toISOString(),
-            likes: 0
+            match_date: f.fixture?.date || new Date().toISOString()
           });
 
           if (insertError) {
