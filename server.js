@@ -719,6 +719,38 @@ Provide a data-driven prediction. The reasoning MUST reference specific statisti
 
   const result = await callClaude(sys, msg, 800);
   result.dataSource = homeData ? "live_stats" : "ai_knowledge";
+
+  // Add form arrays for frontend display
+  if (homeData && homeData.form) {
+    result.homeForm = homeData.form.split("").map(r => ({ result: r }));
+    result.h2hText = h2h;
+  }
+  if (awayData && awayData.form) {
+    result.awayForm = awayData.form.split("").map(r => ({ result: r }));
+  }
+  if (homeData) {
+    result.homeStats = {
+      played: homeData.played,
+      wins: homeData.wins,
+      draws: homeData.draws,
+      losses: homeData.losses,
+      avgScored: homeData.avgScored,
+      avgConceded: homeData.avgConceded,
+      position: homeData.leaguePosition
+    };
+  }
+  if (awayData) {
+    result.awayStats = {
+      played: awayData.played,
+      wins: awayData.wins,
+      draws: awayData.draws,
+      losses: awayData.losses,
+      avgScored: awayData.avgScored,
+      avgConceded: awayData.avgConceded,
+      position: awayData.leaguePosition
+    };
+  }
+
   return result;
 }
 
