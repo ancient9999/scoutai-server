@@ -863,14 +863,18 @@ Write an engaging preview that football fans and bettors will find useful.`;
           const title = home + " vs " + away + " Prediction & Preview — " + lg.name;
           const metaDesc = "Match preview and AI prediction for " + home + " vs " + away + " in " + lg.name + ". Full analysis and betting insights on ScoutAI.";
 
-          await supabase.from("blog_posts").insert({
+          const { error: insertError } = await supabase.from("blog_posts").insert({
             slug, title, content, home, away,
             match_date: f.fixture?.date || new Date().toISOString(),
             likes: 0
           });
 
-          count++;
-          console.log("Blog generated: " + home + " vs " + away);
+          if (insertError) {
+            console.error("Blog insert error:", home + " vs " + away, insertError.message, insertError.details);
+          } else {
+            count++;
+            console.log("Blog generated and saved: " + home + " vs " + away);
+          }
           await new Promise(r => setTimeout(r, 5000));
         } catch(e) { console.error("Blog gen error:", home + " vs " + away, e.message); }
       }
