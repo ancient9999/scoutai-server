@@ -41,7 +41,7 @@ const TTL = {
 async function fetchRetry(url, opts = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
-      const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(12000) });
+      const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(15000) });
       if (r.status === 429) { await new Promise(res => setTimeout(res, 2000 * (i + 1))); continue; }
       return r;
     } catch(e) {
@@ -450,11 +450,13 @@ async function callClaude(sys, msg, maxTokens, model) {
 }
 
 async function callClaudeText(sys, msg, maxTokens, model) {
-  const m = model || "claude-opus-4-5";
-  const r = await fetchRetry("https://api.anthropic.com/v1/messages", {
+  const m = model || "claude-sonnet-4-6";
+  // Use longer timeout for text generation (25s)
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
-    body:JSON.stringify({ model:m, max_tokens:maxTokens||2000, system:sys, messages:[{role:"user",content:msg}] })
+    body:JSON.stringify({ model:m, max_tokens:maxTokens||1500, system:sys, messages:[{role:"user",content:msg}] }),
+    signal: AbortSignal.timeout(25000)
   });
   const d = await r.json();
   if (d.error) throw new Error(d.error.message);
