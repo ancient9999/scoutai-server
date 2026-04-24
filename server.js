@@ -610,14 +610,115 @@ async function callClaudeText(sys, msg, maxTokens, model) {
   return (d.content||[]).map(c=>c.text||"").join("");
 }
 
-async function predictFootball(home, away, compId) {
+async function getTeamData(teamId, leagueId, season) {
+  try {
+    const [stats, fixtures] = await Promise.all([
+      afGet("/teams/statistics?league=" + leagueId + "&season=" + season + "&team=" + teamId),
+      afGet("/fixtures?team=" + teamId + "&league=" + leagueId + "&season=" + season + "&last=5&status=FT")
+    ]);
+
+    const form = stats?.form || "";
+    const last5 = form.slice(-5);
+    const played = stats?.fixtures?.played?.total || 0;
+    const wins = stats?.fixtures?.wins?.total || 0;
+    const draws = stats?.fixtures?.draws?.total || 0;
+    const losses = stats?.fixtures?.loses?.total || 0;
+    const goalsFor = stats?.goals?.for?.total?.total || 0;
+    const goalsAgainst = stats?.goals?.against?.total?.total || 0;
+    const cleanSheets = stats?.clean_sheet?.total || 0;
+    const avgScored = played ? (goalsFor/played).toFixed(1) : "0";
+    const avgConceded = played ? (goalsAgainst/played).toFixed(1) : "0";
+
+    // Recent 5 results
+    const recent = (fixtures||[]).slice(0,5).map(f => {
+      const isHome = f.teams?.home?.id == teamId;
+      const teamGoals = isHome ? f.goals?.home : f.goals?.away;
+      const oppGoals = isHome ? f.goals?.away : f.goals?.home;
+      const opp = isHome ? f.teams?.away?.name : f.teams?.home?.name;
+      const res = teamGoals > oppGoals ? "W" : teamGoals < oppGoals ? "L" : "D";
+      return res + " " + teamGoals + "-" + oppGoals + " vs " + opp;
+    }).join(", ");
+
+    return {
+      form: last5,
+      played, wins, draws, losses,
+      goalsFor, goalsAgainst,
+      avgScored, avgConceded,
+      cleanSheets,
+      recent: recent || "No recent data",
+      leaguePosition: stats?.league?.standings?.[0]?.[0]?.rank || null
+    };
+  } catch(e) {
+    return { form:"?????", recent:"Data unavailable", avgScored:"?", avgConceded:"?" };
+  }
+}
+
+async function getH2H(homeId, awayId) {
+  try {
+    const data = await afGet("/fixtures/headtohead?h2h=" + homeId + "-" + awayId + "&last=5");
+    if (!data || !data.length) return "No H2H data available";
+    const results = data.slice(0,5).map(f => {
+      const hName = f.teams?.home?.name;
+      const aName = f.teams?.away?.name;
+      const hGoals = f.goals?.home;
+      const aGoals = f.goals?.away;
+      return hName + " " + hGoals + "-" + aGoals + " " + aName;
+    });
+    return results.join(" | ");
+  } catch(e) { return "H2H data unavailable"; }
+}
+
+async function predictFootball(home, away, compId, homeId, awayId) {
   const lg = compId ? LEAGUES[compId] : null;
-  const sys = "Expert football analyst. Analyze the teams and predict the match outcome. Respond ONLY with valid JSON: " +
-    '{"result":"Home Win or Draw or Away Win","result_confidence":75,"over25":true,"over25_confidence":65,' +
-    '"btts":true,"btts_confidence":60,"score":"2-1","reasoning":"2-3 sentences of analysis"}';
-  const msg = "Predict: " + home + " (HOME) vs " + away + " (AWAY)" + (lg ? " in the " + lg.name : "");
-  const result = await callClaude(sys, msg, 600);
-  result.dataSource = "ai";
+
+  // Fetch real data in parallel
+  let homeData = null, awayData = null, h2h = null;
+  if (lg && homeId && awayId) {
+    [homeData, awayData, h2h] = await Promise.all([
+      getTeamData(homeId, lg.id, lg.season),
+      getTeamData(awayId, lg.id, lg.season),
+      getH2H(homeId, awayId)
+    ]);
+  }
+
+  const sys = `You are an elite football data analyst for ScoutAI. Analyze ALL the provided statistics carefully and predict the match outcome.
+You MUST base your prediction on the actual data provided, not just team reputation.
+Respond ONLY with valid JSON — no extra text:
+{"result":"Home Win or Draw or Away Win","result_confidence":75,"over25":true,"over25_confidence":65,"btts":true,"btts_confidence":60,"score":"2-1","reasoning":"3-4 sentences referencing specific stats"}`;
+
+  let msg = `Match: ${home} (HOME) vs ${away} (AWAY)`;
+  if (lg) msg += `
+Competition: ${lg.name}`;
+
+  if (homeData && awayData) {
+    msg += `
+
+${home} STATS:
+- League form (last 5): ${homeData.form} | Recent: ${homeData.recent}
+- Season record: ${homeData.wins}W ${homeData.draws}D ${homeData.losses}L from ${homeData.played} games
+- Goals: Scored ${homeData.goalsFor} (avg ${homeData.avgScored}/game) | Conceded ${homeData.goalsAgainst} (avg ${homeData.avgConceded}/game)
+- Clean sheets: ${homeData.cleanSheets}
+${homeData.leaguePosition ? "- League position: #" + homeData.leaguePosition : ""}
+
+${away} STATS:
+- League form (last 5): ${awayData.form} | Recent: ${awayData.recent}
+- Season record: ${awayData.wins}W ${awayData.draws}D ${awayData.losses}L from ${awayData.played} games
+- Goals: Scored ${awayData.goalsFor} (avg ${awayData.avgScored}/game) | Conceded ${awayData.goalsAgainst} (avg ${awayData.avgConceded}/game)
+- Clean sheets: ${awayData.cleanSheets}
+${awayData.leaguePosition ? "- League position: #" + awayData.leaguePosition : ""}
+
+HEAD-TO-HEAD (last 5): ${h2h}`;
+  } else {
+    msg += `
+Note: Using AI knowledge only — no live stats available for this match.`;
+  }
+
+  msg += `
+
+Provide a data-driven prediction. The reasoning MUST reference specific statistics from above.`;
+
+  const result = await callClaude(sys, msg, 800);
+  result.dataSource = homeData ? "live_stats" : "ai_knowledge";
   return result;
 }
 
@@ -640,7 +741,7 @@ app.post("/predict", async (req, res) => {
   if (!home || !away) return res.status(400).json({ error:"Teams required" });
   try {
     const s = sport || "football";
-    const result = s === "football" ? await predictFootball(home, away, compId) : await predictSport(home, away, s, compId);
+    const result = s === "football" ? await predictFootball(home, away, compId, homeId, awayId) : await predictSport(home, away, s, compId);
     res.json(result);
   } catch(e) { res.status(500).json({ error:"Prediction failed: " + e.message }); }
 });
