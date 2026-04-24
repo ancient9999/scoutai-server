@@ -1137,12 +1137,43 @@ app.get("/telegram/parlay", async (req, res) => {
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
   res.json({ success:true, message:"Fetching parlays and posting to Telegram..." });
   try {
-    const parlayRes = await fetch("https://scoutai-server.onrender.com/parlays");
-    const parlayData = await parlayRes.json();
-    if (parlayData && (parlayData.safe || parlayData.medium)) {
-      await postDailyParlayToTelegram(parlayData);
+    // Use cached parlay if available, otherwise get from cache
+    const cached = getCache("parlays");
+    if (cached && (cached.safe || cached.medium)) {
+      await postDailyParlayToTelegram(cached);
+      console.log("Telegram parlay posted from cache");
     } else {
-      await sendTelegram("⚠️ No parlay data available right now. Check back later.");
+      // Build parlays fresh
+      const today = new Date().toISOString().split("T")[0];
+      const allFx = [];
+      for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","CL","EL"]) {
+        try {
+          const lg = LEAGUES[id];
+          const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&date=" + today + "&status=NS-PST-1H-2H-HT");
+          data.slice(0,2).forEach(f => allFx.push({ compId:id, compName:lg.name, flag:lg.flag, home:f.teams?.home?.name, away:f.teams?.away?.name, homeCrest:f.teams?.home?.logo, awayCrest:f.teams?.away?.logo, date:f.fixture?.date, fixtureId:f.fixture?.id }));
+        } catch {}
+      }
+      if (allFx.length < 3) {
+        await sendTelegram("⚠️ ScoutAI: Not enough fixtures today for a parlay. Check scoutaibot.com for individual predictions.");
+        return;
+      }
+      const preds = await Promise.all(allFx.slice(0,8).map(async f => {
+        try { return { ...f, prediction: await predictFootball(f.home, f.away, f.compId) }; } catch { return null; }
+      }));
+      const valid = preds.filter(p=>p&&p.prediction&&!p.prediction.error).sort((a,b)=>b.prediction.result_confidence-a.prediction.result_confidence);
+      if (!valid.length) { await sendTelegram("⚠️ ScoutAI: Could not generate predictions right now."); return; }
+      const buildSlip = (picks, label, emoji) => ({
+        label, emoji,
+        picks: picks.map(p=>({ home:p.home, away:p.away, flag:p.flag, compName:p.compName, result:p.prediction.result, confidence:p.prediction.result_confidence, score:p.prediction.score, odds:parseFloat((100/p.prediction.result_confidence).toFixed(2)) })),
+        totalOdds: picks.reduce((a,p)=>a*parseFloat((100/p.prediction.result_confidence).toFixed(2)),1).toFixed(2),
+        combinedConf: Math.round(picks.reduce((a,p)=>a*(p.prediction.result_confidence/100),1)*100)
+      });
+      const parlayData = {
+        safe: buildSlip(valid.filter(p=>p.prediction.result_confidence>=70).slice(0,3), "Safe Parlay", "🔒"),
+        medium: buildSlip(valid.slice(0,5), "Value Parlay", "🎯")
+      };
+      await postDailyParlayToTelegram(parlayData);
+      console.log("Telegram parlay posted fresh");
     }
   } catch(e) { console.error("Manual parlay post error:", e.message); }
 });
