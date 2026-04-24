@@ -831,37 +831,43 @@ async function autoBlog() {
         if (existing.data) continue;
 
         try {
-          // Get real fixture data for context
           const fixtureId = f.fixture?.id;
-          let homeForm = "", awayForm = "";
-          try {
-            const homeStats = await afGet("/teams/statistics?league=" + lg.id + "&season=" + lg.season + "&team=" + f.teams.home.id);
-            const awayStats = await afGet("/teams/statistics?league=" + lg.id + "&season=" + lg.season + "&team=" + f.teams.away.id);
-            const hf = homeStats?.form || "";
-            const af = awayStats?.form || "";
-            homeForm = hf.slice(-5).split("").join(", ") + " (last 5)";
-            awayForm = af.slice(-5).split("").join(", ") + " (last 5)";
-          } catch(e) {}
+          const matchDate = f.fixture?.date ? new Date(f.fixture.date).toDateString() : "upcoming";
 
-          const pred = await predictFootball(home, away, id);
-          const content = await generateBlogArticle(home, away, lg.name, id, fixtureId, pred, { homeForm, awayForm });
+          const sys = `You are an expert football journalist writing for ScoutAI (scoutaibot.com).
+Write a match preview article of 600-700 words. Use these exact headings:
+## Match Overview
+## Team Form & Recent Results
+## Head-to-Head Analysis
+## Key Players to Watch
+## ScoutAI Prediction & Betting Insight
 
-          const title = home + " vs " + away + " Prediction & Preview — " + lg.name + " | ScoutAI";
-          const metaDesc = "AI-powered " + home + " vs " + away + " prediction for " + lg.name + ". " + pred.result + " with " + pred.result_confidence + "% confidence. Full analysis on ScoutAI.";
+Rules:
+- Sound like a real sports journalist, specific and engaging
+- Reference ScoutAI naturally as the AI prediction platform
+- End with a call to visit scoutaibot.com for the full AI prediction
+- No placeholders, no [brackets]
+- Plain text with markdown headings only`;
+
+          const msg = `Write a match preview for: ${home} vs ${away}
+Competition: ${lg.name}
+Match date: ${matchDate}
+Write an engaging preview that football fans and bettors will find useful.`;
+
+          const content = await callClaudeText(sys, msg, 1400, "claude-sonnet-4-6");
+
+          const title = home + " vs " + away + " Prediction & Preview — " + lg.name;
+          const metaDesc = "Match preview and AI prediction for " + home + " vs " + away + " in " + lg.name + ". Full analysis and betting insights on ScoutAI.";
 
           await supabase.from("blog_posts").insert({
-            slug,
-            title,
-            content,
-            home,
-            away,
+            slug, title, content, home, away,
             match_date: f.fixture?.date || new Date().toISOString(),
             likes: 0
           });
 
           count++;
           console.log("Blog generated: " + home + " vs " + away);
-          await new Promise(r => setTimeout(r, 4000)); // Rate limit pause
+          await new Promise(r => setTimeout(r, 2000));
         } catch(e) { console.error("Blog gen error:", home + " vs " + away, e.message); }
       }
     } catch(e) { console.error("Blog league error:", id, e.message); }
