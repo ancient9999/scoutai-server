@@ -970,10 +970,11 @@ async function resolvePredictions() {
 app.get("/cron/daily", async (req, res) => {
   const secret = req.headers["x-cron-secret"]||req.query.secret;
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
-  const results = { errors:[] };
-  try { await autoBlog(); results.blogGenerated = true; } catch(e) { results.errors.push("Blog: "+e.message); }
-  try { results.predictionsResolved = await resolvePredictions(); } catch(e) { results.errors.push("Resolve: "+e.message); }
-  res.json({ success:true, timestamp:new Date().toISOString(), ...results });
+  // Respond immediately — run tasks in background to avoid timeout
+  res.json({ success:true, timestamp:new Date().toISOString(), message:"Tasks running in background..." });
+  try { await autoBlog(); } catch(e) { console.error("Cron blog error:", e.message); }
+  try { await resolvePredictions(); } catch(e) { console.error("Cron resolve error:", e.message); }
+  console.log("Cron daily complete:", new Date().toISOString());
 });
 
 app.get("/ping", (req, res) => res.json({ ok:true, ts:Date.now() }));
