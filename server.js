@@ -12,6 +12,133 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const SUPABASE_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 const supabase = SUPABASE_ENABLED ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY) : null;
 
+// ── TELEGRAM BOT ────────────────────────────────────────────────────────────
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL_ID || "@scoutaibottips";
+
+async function sendTelegram(message) {
+  if (!TELEGRAM_TOKEN) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHANNEL,
+        text: message,
+        parse_mode: "HTML",
+        disable_web_page_preview: false
+      }),
+      signal: AbortSignal.timeout(10000)
+    });
+    console.log("Telegram message sent");
+  } catch(e) { console.error("Telegram error:", e.message); }
+}
+
+async function postDailyParlayToTelegram(parlays) {
+  if (!parlays || !parlays.safe) return;
+  const safe = parlays.safe;
+  const today = new Date().toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long" });
+
+  let msg = `🤖 <b>ScoutAI Daily Parlay — ${today}</b>
+`;
+  msg += `━━━━━━━━━━━━━━━━━━━━
+
+`;
+
+  if (parlays.safe && parlays.safe.picks?.length) {
+    msg += `🔒 <b>SAFE PARLAY</b> — ${parlays.safe.combinedConf}% confidence
+`;
+    msg += `💰 Total odds: <b>${parlays.safe.totalOdds}x</b>
+
+`;
+    parlays.safe.picks.forEach(p => {
+      msg += `${p.flag} ${p.home} vs ${p.away}
+`;
+      msg += `   ✅ <b>${p.result}</b> (${p.confidence}%)
+
+`;
+    });
+  }
+
+  if (parlays.medium && parlays.medium.picks?.length) {
+    msg += `🎯 <b>VALUE PARLAY</b> — ${parlays.medium.combinedConf}% confidence
+`;
+    msg += `💰 Total odds: <b>${parlays.medium.totalOdds}x</b>
+
+`;
+    parlays.medium.picks.slice(0,3).forEach(p => {
+      msg += `${p.flag} ${p.home} vs ${p.away}
+`;
+      msg += `   ✅ <b>${p.result}</b> (${p.confidence}%)
+
+`;
+    });
+  }
+
+  msg += `━━━━━━━━━━━━━━━━━━━━
+`;
+  msg += `🔮 Full predictions & analysis:
+`;
+  msg += `👉 <a href="https://scoutaibot.com/parlays">scoutaibot.com/parlays</a>
+
+`;
+  msg += `⚠️ 18+ | Gamble responsibly`;
+
+  await sendTelegram(msg);
+}
+
+async function postResultsToTelegram() {
+  if (!SUPABASE_ENABLED) return;
+  try {
+    const yesterday = new Date(Date.now() - 24*60*60*1000).toISOString().split("T")[0];
+    const { data } = await supabase.from("predictions")
+      .select("*")
+      .eq("parlay_type", "safe")
+      .gte("date", yesterday)
+      .not("status", "eq", "pending");
+
+    if (!data || !data.length) return;
+
+    const won = data.filter(p => p.status === "won");
+    const lost = data.filter(p => p.status === "lost");
+    const accuracy = Math.round(won.length / data.length * 100);
+
+    let msg = `📊 <b>ScoutAI Yesterday's Results</b>
+`;
+    msg += `━━━━━━━━━━━━━━━━━━━━
+
+`;
+    msg += `✅ Correct: <b>${won.length}</b> | ❌ Wrong: <b>${lost.length}</b>
+`;
+    msg += `🎯 Accuracy: <b>${accuracy}%</b>
+
+`;
+
+    data.forEach(p => {
+      const icon = p.status === "won" ? "✅" : "❌";
+      msg += `${icon} ${p.home} vs ${p.away}
+`;
+      msg += `   AI: <b>${p.result}</b>`;
+      if (p.actual_result) msg += ` → Real: <b>${p.actual_result}</b>`;
+      if (p.actual_score) msg += ` (${p.actual_score})`;
+      msg += `
+
+`;
+    });
+
+    msg += `━━━━━━━━━━━━━━━━━━━━
+`;
+    msg += `🔮 Today's predictions:
+`;
+    msg += `👉 <a href="https://scoutaibot.com">scoutaibot.com</a>
+
+`;
+    msg += `⚠️ 18+ | Gamble responsibly`;
+
+    await sendTelegram(msg);
+  } catch(e) { console.error("Telegram results error:", e.message); }
+}
+
 const AF_KEY = { "x-apisports-key": process.env.RAPID_API_KEY };
 const BDL_KEY = { "Authorization": process.env.BDL_API_KEY };
 const ESPN = "https://site.api.espn.com/apis/site/v2/sports";
@@ -987,10 +1114,38 @@ app.get("/cron/daily", async (req, res) => {
   res.json({ success:true, timestamp:new Date().toISOString(), message:"Tasks running in background..." });
   try { await autoBlog(); } catch(e) { console.error("Cron blog error:", e.message); }
   try { await resolvePredictions(); } catch(e) { console.error("Cron resolve error:", e.message); }
+  // Post results to Telegram after resolution
+  try { await postResultsToTelegram(); } catch(e) { console.error("Telegram results error:", e.message); }
   console.log("Cron daily complete:", new Date().toISOString());
 });
 
 app.get("/ping", (req, res) => res.json({ ok:true, ts:Date.now() }));
+
+// Manual Telegram test endpoint
+app.get("/telegram/test", async (req, res) => {
+  const secret = req.query.secret;
+  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await sendTelegram("🤖 <b>ScoutAI Bot is live!</b>\n\nDaily parlays and predictions will be posted here every morning.\n\n👉 <a href=\"https://scoutaibot.com\">scoutaibot.com</a>");
+    res.json({ success:true, message:"Test message sent to Telegram" });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// Manual parlay post to Telegram
+app.get("/telegram/parlay", async (req, res) => {
+  const secret = req.query.secret;
+  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
+  res.json({ success:true, message:"Fetching parlays and posting to Telegram..." });
+  try {
+    const parlayRes = await fetch("https://scoutai-server.onrender.com/parlays");
+    const parlayData = await parlayRes.json();
+    if (parlayData && (parlayData.safe || parlayData.medium)) {
+      await postDailyParlayToTelegram(parlayData);
+    } else {
+      await sendTelegram("⚠️ No parlay data available right now. Check back later.");
+    }
+  } catch(e) { console.error("Manual parlay post error:", e.message); }
+});
 
 // ── STARTUP & SCHEDULED TASKS ──────────────────────────────────────────────
 // Keep alive ping
@@ -1014,6 +1169,15 @@ setInterval(async () => {
     lastBlogDate = today;
     console.log("Midnight CET: running autoBlog...");
     try { await autoBlog(); } catch(e) { console.error("Scheduled blog error:", e.message); }
+    // Generate parlays and post to Telegram
+    try {
+      const parlayRes = await fetch("https://scoutai-server.onrender.com/parlays");
+      const parlayData = await parlayRes.json();
+      if (parlayData && parlayData.safe) {
+        await postDailyParlayToTelegram(parlayData);
+        console.log("Telegram parlay posted");
+      }
+    } catch(e) { console.error("Telegram parlay error:", e.message); }
   }
 
   // 11pm CET = 22:00 UTC (winter) or 21:00 UTC (summer) — run resolution after all European games finish
