@@ -456,7 +456,7 @@ async function callClaudeText(sys, msg, maxTokens, model) {
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":process.env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},
     body:JSON.stringify({ model:m, max_tokens:maxTokens||1500, system:sys, messages:[{role:"user",content:msg}] }),
-    signal: AbortSignal.timeout(25000)
+    signal: AbortSignal.timeout(35000)
   });
   const d = await r.json();
   if (d.error) throw new Error(d.error.message);
@@ -724,12 +724,14 @@ app.post("/blog/generate", async (req, res) => {
 app.get("/blog", async (req, res) => {
   if (!SUPABASE_ENABLED) return res.json([]);
   try {
-    const { data } = await supabase.from("blog_posts")
-      .select("slug,title,home,away,match_date,created_at,likes")
-      .order("created_at",{ascending:false})
+    const { data, error } = await supabase.from("blog_posts")
+      .select("*")
+      .order("id",{ascending:false})
       .limit(50);
+    if (error) { console.error("Blog fetch error:", error.message); return res.status(500).json({ error:error.message }); }
+    console.log("Blog fetch: " + (data||[]).length + " posts found");
     res.json(data||[]);
-  } catch(e) { res.status(500).json({ error:e.message }); }
+  } catch(e) { console.error("Blog catch error:", e.message); res.status(500).json({ error:e.message }); }
 });
 
 app.get("/blog/:slug", async (req, res) => {
@@ -815,7 +817,7 @@ async function autoBlog() {
   const blogLeagues = ["PL","PD","BL1","SA","FL1","CL","EL","UECL","FAC","CDR","DFB","CPI"];
 
   for (const id of blogLeagues) {
-    if (count >= 8) break;
+    if (count >= 5) break;
     try {
       const lg = LEAGUES[id];
       if (!lg) continue;
@@ -823,7 +825,7 @@ async function autoBlog() {
       if (!data || !data.length) continue;
 
       for (const f of data.slice(0,2)) {
-        if (count >= 8) break;
+        if (count >= 5) break;
         const home = f.teams?.home?.name;
         const away = f.teams?.away?.name;
         if (!home || !away) continue;
@@ -869,7 +871,7 @@ Write an engaging preview that football fans and bettors will find useful.`;
 
           count++;
           console.log("Blog generated: " + home + " vs " + away);
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 5000));
         } catch(e) { console.error("Blog gen error:", home + " vs " + away, e.message); }
       }
     } catch(e) { console.error("Blog league error:", id, e.message); }
