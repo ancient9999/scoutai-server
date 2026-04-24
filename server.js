@@ -35,9 +35,10 @@ async function sendTelegram(message) {
 }
 
 async function postDailyParlayToTelegram(parlays) {
-  if (!parlays || !parlays.safe) return;
-  const safe = parlays.safe;
+  if (!parlays) return;
   const today = new Date().toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long" });
+
+  const avgConf = (picks) => picks.length ? Math.round(picks.reduce((a,p)=>a+p.confidence,0)/picks.length) : 0;
 
   let msg = `🤖 <b>ScoutAI Daily Parlay — ${today}</b>
 `;
@@ -46,41 +47,60 @@ async function postDailyParlayToTelegram(parlays) {
 `;
 
   if (parlays.safe && parlays.safe.picks?.length) {
-    msg += `🔒 <b>SAFE PARLAY</b> — ${parlays.safe.combinedConf}% confidence
+    const avg = avgConf(parlays.safe.picks);
+    msg += `🔒 <b>SAFE PARLAY</b>
 `;
-    msg += `💰 Total odds: <b>${parlays.safe.totalOdds}x</b>
+    msg += `📊 Avg confidence: <b>${avg}%</b> | Odds: <b>${parlays.safe.totalOdds}x</b>
 
 `;
     parlays.safe.picks.forEach(p => {
-      msg += `${p.flag} ${p.home} vs ${p.away}
+      const marketIcon = p.market==="over25"?"⚽":p.market==="btts"?"🎯":"🏆";
+      msg += `${p.flag||"⚽"} <b>${p.home}</b> vs <b>${p.away}</b>
 `;
-      msg += `   ✅ <b>${p.result}</b> (${p.confidence}%)
+      msg += `   ${marketIcon} ${p.result} <i>(${p.confidence}%)</i>
 
 `;
     });
   }
 
   if (parlays.medium && parlays.medium.picks?.length) {
-    msg += `🎯 <b>VALUE PARLAY</b> — ${parlays.medium.combinedConf}% confidence
+    // Show only picks NOT already in safe parlay
+    const safePicks = new Set((parlays.safe?.picks||[]).map(p=>p.home+"_"+p.away));
+    const valuePicks = parlays.medium.picks.filter(p=>!safePicks.has(p.home+"_"+p.away));
+    if (valuePicks.length) {
+      const avg = avgConf(valuePicks);
+      msg += `🎯 <b>VALUE PARLAY</b> — Extra picks
 `;
-    msg += `💰 Total odds: <b>${parlays.medium.totalOdds}x</b>
+      msg += `📊 Avg confidence: <b>${avg}%</b> | Odds: <b>${parlays.medium.totalOdds}x</b>
 
 `;
-    parlays.medium.picks.slice(0,3).forEach(p => {
-      msg += `${p.flag} ${p.home} vs ${p.away}
+      valuePicks.slice(0,3).forEach(p => {
+        const marketIcon = p.market==="over25"?"⚽":p.market==="btts"?"🎯":"🏆";
+        msg += `${p.flag||"⚽"} <b>${p.home}</b> vs <b>${p.away}</b>
 `;
-      msg += `   ✅ <b>${p.result}</b> (${p.confidence}%)
+        msg += `   ${marketIcon} ${p.result} <i>(${p.confidence}%)</i>
 
 `;
-    });
+      });
+    }
+  }
+
+  if (parlays.highRisk && parlays.highRisk.picks?.length) {
+    msg += `💣 <b>HIGH RISK PARLAY</b> — ${parlays.highRisk.totalOdds}x odds
+`;
+    msg += `<i>Visit site for full details</i>
+
+`;
   }
 
   msg += `━━━━━━━━━━━━━━━━━━━━
 `;
-  msg += `🔮 Full predictions & analysis:
+  msg += `🔮 Full analysis & predictions:
 `;
   msg += `👉 <a href="https://scoutaibot.com/parlays">scoutaibot.com/parlays</a>
 
+`;
+  msg += `📱 Share with your friends!
 `;
   msg += `⚠️ 18+ | Gamble responsibly`;
 
@@ -800,18 +820,40 @@ app.get("/parlays", async (req, res) => {
     const valid = preds.filter(p=>p&&p.prediction&&!p.prediction.error)
       .sort((a,b)=>b.prediction.result_confidence-a.prediction.result_confidence);
 
+    // Select best market per fixture based on confidence
+    const getBestMarket = (p, preferVariety=false) => {
+      const pred = p.prediction;
+      const markets = [
+        { market:"result", label:pred.result, confidence:pred.result_confidence, odds:parseFloat((100/pred.result_confidence).toFixed(2)) },
+      ];
+      if (pred.over25_confidence >= 60) markets.push({ market:"over25", label:pred.over25?"Over 2.5 Goals":"Under 2.5 Goals", confidence:pred.over25_confidence, odds:parseFloat((100/pred.over25_confidence).toFixed(2)) });
+      if (pred.btts_confidence >= 60) markets.push({ market:"btts", label:pred.btts?"Both Teams to Score":"Clean Sheet", confidence:pred.btts_confidence, odds:parseFloat((100/pred.btts_confidence).toFixed(2)) });
+      // Sort by confidence
+      markets.sort((a,b)=>b.confidence-a.confidence);
+      // For variety, avoid picking result if over25/btts is also high confidence
+      if (preferVariety && markets.length > 1 && markets[0].market === "result") {
+        const alt = markets.find(m=>m.market!=="result");
+        if (alt && alt.confidence >= markets[0].confidence - 8) return alt;
+      }
+      return markets[0];
+    };
+
     const buildSlip = (picks, label, emoji, parlayType) => {
       if (!picks.length) return null;
-      const mappedPicks = picks.map(p=>({
-        home: p.home, away: p.away, flag: p.flag, compName: p.compName,
-        compId: p.compId, homeCrest: p.homeCrest, awayCrest: p.awayCrest,
-        date: p.date, fixtureId: p.fixtureId,
-        result: p.prediction.result, confidence: p.prediction.result_confidence,
-        score: p.prediction.score, odds: parseFloat((100/p.prediction.result_confidence).toFixed(2))
-      }));
+      const mappedPicks = picks.map((p,i)=>{
+        const market = getBestMarket(p, i % 2 === 1); // alternate variety
+        return {
+          home: p.home, away: p.away, flag: p.flag, compName: p.compName,
+          compId: p.compId, homeCrest: p.homeCrest, awayCrest: p.awayCrest,
+          date: p.date, fixtureId: p.fixtureId,
+          result: market.label, market: market.market,
+          confidence: market.confidence,
+          score: p.prediction.score,
+          odds: market.odds
+        };
+      });
       const totalOdds = mappedPicks.reduce((acc,p)=>acc*p.odds,1).toFixed(2);
       const combinedConf = Math.round(mappedPicks.reduce((a,p)=>a*(p.confidence/100),1)*100);
-      // Store each pick for performance tracking
       mappedPicks.forEach(pick => storeParlayPick(pick, parlayType, pick.fixtureId));
       return { label, emoji, riskColor: parlayType==="safe"?"#16a34a":parlayType==="value"?"#d97706":"#dc2626", picks:mappedPicks, totalOdds, combinedConf };
     };
@@ -1056,25 +1098,42 @@ async function resolvePredictions() {
 
     for (const pred of pending) {
       try {
-        // Need a fixture id - extract from key (format: compId_index or compId_fixtureId)
-        const compId = pred.comp_id;
-        if (!compId) continue;
+        const compKey = pred.comp_id;
+        if (!compKey) continue;
 
-        // Fetch recent results for this competition
-        const results = await afGet("/fixtures?league=" + compId + "&season=2025&last=20&status=FT");
-        if (!results || !results.length) continue;
+        // Get numeric league ID from LEAGUES config
+        const lg = LEAGUES[compKey];
+        if (!lg) { console.log("Unknown league:", compKey); continue; }
 
-        // Find matching fixture by team names
-        const match = results.find(f => {
-          const h = f.teams?.home?.name?.toLowerCase() || "";
-          const a = f.teams?.away?.name?.toLowerCase() || "";
-          const ph = pred.home?.toLowerCase() || "";
-          const pa = pred.away?.toLowerCase() || "";
-          return (h.includes(ph.substring(0,6)) || ph.includes(h.substring(0,6))) &&
-                 (a.includes(pa.substring(0,6)) || pa.includes(a.substring(0,6)));
-        });
+        let match = null;
 
-        if (!match) continue;
+        // Try direct fixture lookup by match_id first (most accurate)
+        if (pred.match_id) {
+          try {
+            const fixData = await afGet("/fixtures?id=" + pred.match_id);
+            if (fixData && fixData.length) {
+              const f = fixData[0];
+              const s = f.fixture?.status?.short;
+              if (s === "FT" || s === "AET" || s === "PEN") match = f;
+            }
+          } catch(e) {}
+        }
+
+        // Fallback: fetch recent results by league numeric ID
+        if (!match) {
+          const results = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&last=20&status=FT");
+          if (!results || !results.length) continue;
+          match = results.find(f => {
+            const h = (f.teams?.home?.name||"").toLowerCase();
+            const a = (f.teams?.away?.name||"").toLowerCase();
+            const ph = (pred.home||"").toLowerCase();
+            const pa = (pred.away||"").toLowerCase();
+            return (h.includes(ph.substring(0,5)) || ph.includes(h.substring(0,5))) &&
+                   (a.includes(pa.substring(0,5)) || pa.includes(a.substring(0,5)));
+          });
+        }
+
+        if (!match) { console.log("No match found for:", pred.home, "vs", pred.away); continue; }
 
         const homeGoals = match.goals?.home;
         const awayGoals = match.goals?.away;
