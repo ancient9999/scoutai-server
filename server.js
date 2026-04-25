@@ -1008,13 +1008,13 @@ app.get("/parlays", async (req, res) => {
         };
       });
       const totalOdds = mappedPicks.reduce((acc,p)=>acc*p.odds,1).toFixed(2);
-      const combinedConf = Math.round(mappedPicks.reduce((a,p)=>a*(p.confidence/100),1)*100);
+      const combinedConf = Math.round(mappedPicks.reduce((a,p)=>a+p.confidence,0)/mappedPicks.length);
       mappedPicks.forEach(pick => storeParlayPick(pick, parlayType, pick.fixtureId));
       return { label, emoji, riskColor: parlayType==="safe"?"#16a34a":parlayType==="value"?"#d97706":"#dc2626", picks:mappedPicks, totalOdds, combinedConf };
     };
 
     const safePicks = valid.filter(p=>p.prediction.result_confidence>=70).slice(0,3);
-    const valuePicks = valid.filter(p=>p.prediction.result_confidence>=60).slice(0,5);
+    const valuePicks = valid.slice(0,5);
     const riskPicks = valid.slice(0,7);
 
     const result = {
@@ -1386,7 +1386,7 @@ app.get("/telegram/parlay", async (req, res) => {
         label, emoji,
         picks: picks.map(p=>({ home:p.home, away:p.away, flag:p.flag, compName:p.compName, result:p.prediction.result, confidence:p.prediction.result_confidence, score:p.prediction.score, odds:parseFloat((100/p.prediction.result_confidence).toFixed(2)) })),
         totalOdds: picks.reduce((a,p)=>a*parseFloat((100/p.prediction.result_confidence).toFixed(2)),1).toFixed(2),
-        combinedConf: Math.round(picks.reduce((a,p)=>a*(p.prediction.result_confidence/100),1)*100)
+        combinedConf: Math.round(picks.reduce((a,p)=>a+p.prediction.result_confidence,0)/picks.length)
       });
       const parlayData = {
         safe: buildSlip(valid.filter(p=>p.prediction.result_confidence>=70).slice(0,3), "Safe Parlay", "🔒"),
