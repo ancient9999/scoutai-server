@@ -914,15 +914,18 @@ app.get("/prediction-of-day", async (req, res) => {
 async function storeParlayPick(pick, parlayType, fixtureId) {
   if (!SUPABASE_ENABLED) return;
   try {
-    const key = "parlay_" + parlayType + "_" + pick.home.replace(/\s+/g,"_") + "_" + pick.away.replace(/\s+/g,"_") + "_" + new Date().toISOString().split("T")[0];
-    const existing = await supabase.from("predictions").select("key").eq("key",key).single();
-    if (existing.data) return; // already stored today
-    await supabase.from("predictions").insert({
+    const today = new Date().toISOString().split("T")[0];
+    const safeHome = (pick.home||"").replace(/[^a-z0-9]/gi,"_");
+    const safeAway = (pick.away||"").replace(/[^a-z0-9]/gi,"_");
+    const key = "parlay_" + parlayType + "_" + safeHome + "_" + safeAway + "_" + today;
+    const fid = fixtureId ? parseInt(fixtureId) : null;
+
+    const { error } = await supabase.from("predictions").upsert({
       key,
       home: pick.home,
       away: pick.away,
-      comp_id: pick.compId || null,
-      match_id: fixtureId || null,
+      comp_id: pick.compId || pick.comp_id || null,
+      match_id: fid,
       result: pick.result,
       score: pick.score || null,
       confidence: pick.confidence,
@@ -931,8 +934,11 @@ async function storeParlayPick(pick, parlayType, fixtureId) {
       date: pick.date || new Date().toISOString(),
       parlay_type: parlayType,
       created_at: new Date().toISOString()
-    });
-  } catch(e) { console.error("storeParlayPick error:", e.message); }
+    }, { onConflict: "key", ignoreDuplicates: true });
+
+    if (error) console.error("storeParlayPick error:", error.message);
+    else console.log("Parlay stored:", pick.home, "vs", pick.away, "| matchId:", fid, "| type:", parlayType);
+  } catch(e) { console.error("storeParlayPick exception:", e.message); }
 }
 
 app.get("/parlays", async (req, res) => {
@@ -1149,8 +1155,8 @@ async function autoBlog() {
         if (!home || !away) continue;
 
         const slug = home.toLowerCase().replace(/[^a-z0-9]+/g,"-") + "-vs-" + away.toLowerCase().replace(/[^a-z0-9]+/g,"-") + "-" + today;
-        const existing = await supabase.from("blog_posts").select("slug").eq("slug",slug).single();
-        if (existing.data) continue;
+        const { data: existingPost } = await supabase.from("blog_posts").select("slug").eq("slug",slug).maybeSingle();
+        if (existingPost) { console.log("Skipping existing post:", slug); continue; }
 
         try {
           const fixtureId = f.fixture?.id;
@@ -1181,13 +1187,13 @@ Write an engaging preview that football fans and bettors will find useful.`;
           const title = home + " vs " + away + " Prediction & Preview — " + lg.name;
           const metaDesc = "Match preview and AI prediction for " + home + " vs " + away + " in " + lg.name + ". Full analysis and betting insights on ScoutAI.";
 
-          const { error: insertError } = await supabase.from("blog_posts").insert({
+          const { error: insertError } = await supabase.from("blog_posts").upsert({
             slug, title, content, home, away,
             match_date: f.fixture?.date || new Date().toISOString()
-          });
+          }, { onConflict: "slug", ignoreDuplicates: true });
 
           if (insertError) {
-            console.error("Blog insert error:", home + " vs " + away, insertError.message, insertError.details);
+            console.error("Blog insert error:", home + " vs " + away, insertError.message);
           } else {
             count++;
             console.log("Blog generated and saved: " + home + " vs " + away);
