@@ -629,24 +629,36 @@ async function getTeamData(teamId, leagueId, season) {
     const avgScored = played ? (goalsFor/played).toFixed(1) : "0";
     const avgConceded = played ? (goalsAgainst/played).toFixed(1) : "0";
 
-    // Recent 5 results
-    const recent = (fixtures||[]).slice(0,5).map(f => {
+    // Recent 5 results with opponent names
+    const recentMatches = (fixtures||[]).slice(0,5).map(f => {
       const isHome = f.teams?.home?.id == teamId;
       const teamGoals = isHome ? f.goals?.home : f.goals?.away;
       const oppGoals = isHome ? f.goals?.away : f.goals?.home;
       const opp = isHome ? f.teams?.away?.name : f.teams?.home?.name;
       const res = teamGoals > oppGoals ? "W" : teamGoals < oppGoals ? "L" : "D";
-      return res + " " + teamGoals + "-" + oppGoals + " vs " + opp;
-    }).join(", ");
+      const date = f.fixture?.date ? new Date(f.fixture.date).toLocaleDateString("en-GB",{day:"numeric",month:"short"}) : "";
+      return { result: res, score: teamGoals + "-" + oppGoals, opponent: opp, date, venue: isHome ? "H" : "A" };
+    });
+    const recent = recentMatches.map(m => m.result + " " + m.score + " vs " + m.opponent).join(", ");
 
     return {
       form: last5,
+      recentMatches,
       played, wins, draws, losses,
       goalsFor, goalsAgainst,
       avgScored, avgConceded,
       cleanSheets,
       recent: recent || "No recent data",
-      leaguePosition: stats?.league?.standings?.[0]?.[0]?.rank || null
+      leaguePosition: (() => {
+      try {
+        const s = stats?.league?.standings;
+        if (!s) return null;
+        // standings can be [[...]] or [...]
+        const flat = Array.isArray(s[0]) ? s[0] : s;
+        const entry = flat.find(e => e.team?.id == teamId);
+        return entry?.rank || null;
+      } catch(e) { return null; }
+    })()
     };
   } catch(e) {
     return { form:"?????", recent:"Data unavailable", avgScored:"?", avgConceded:"?" };
@@ -722,11 +734,15 @@ Provide a data-driven prediction. The reasoning MUST reference specific statisti
 
   // Add form arrays for frontend display
   if (homeData && homeData.form) {
-    result.homeForm = homeData.form.split("").map(r => ({ result: r }));
+    result.homeForm = homeData.recentMatches && homeData.recentMatches.length 
+      ? homeData.recentMatches.map(m => ({ result: m.result, score: m.score, opponent: m.opponent, date: m.date, venue: m.venue }))
+      : homeData.form.split("").map(r => ({ result: r }));
     result.h2hText = h2h;
   }
   if (awayData && awayData.form) {
-    result.awayForm = awayData.form.split("").map(r => ({ result: r }));
+    result.awayForm = awayData.recentMatches && awayData.recentMatches.length
+      ? awayData.recentMatches.map(m => ({ result: m.result, score: m.score, opponent: m.opponent, date: m.date, venue: m.venue }))
+      : awayData.form.split("").map(r => ({ result: r }));
   }
   if (homeData) {
     result.homeStats = {
@@ -1227,6 +1243,7 @@ async function resolvePredictions() {
     if (!pending.length) { console.log("No pending predictions to resolve"); return 0; }
 
     console.log(`Resolving ${pending.length} pending predictions...`);
+    pending.forEach(p => console.log("  - Pending:", p.home, "vs", p.away, "| comp_id:", p.comp_id, "| match_id:", p.match_id));
     let resolved = 0;
 
     for (const pred of pending) {
@@ -1255,6 +1272,8 @@ async function resolvePredictions() {
         // Fallback: fetch recent results by league numeric ID
         if (!match) {
           const results = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&last=20&status=FT");
+          console.log("Fetched", results?.length||0, "results for league", lg.id, "("+lg.name+")");
+          if (results?.length) console.log("Sample teams:", results.slice(0,3).map(f=>f.teams?.home?.name+"vs"+f.teams?.away?.name).join(", "));
           if (!results || !results.length) continue;
           match = results.find(f => {
             const h = (f.teams?.home?.name||"").toLowerCase();
@@ -1266,7 +1285,10 @@ async function resolvePredictions() {
           });
         }
 
-        if (!match) { console.log("No match found for:", pred.home, "vs", pred.away); continue; }
+        if (!match) {
+          console.log("No match found for:", pred.home, "vs", pred.away, "| comp_id:", compKey, "| league_id:", lg.id);
+          continue;
+        }
 
         const homeGoals = match.goals?.home;
         const awayGoals = match.goals?.away;
