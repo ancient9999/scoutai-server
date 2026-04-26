@@ -219,9 +219,17 @@ const LEAGUES = {
   BSA: { id:71,  name:"Serie A",             country:"Brazil",      flag:"🇧🇷", season:2025 },
   ARG: { id:128, name:"Liga Profesional",    country:"Argentina",   flag:"🇦🇷", season:2025 },
   MEX: { id:262, name:"Liga MX",             country:"Mexico",      flag:"🇲🇽", season:2025 },
-  CL:  { id:2,   name:"Champions League",    country:"Europe",      flag:"🏆", season:2025 },
-  EL:  { id:3,   name:"Europa League",       country:"Europe",      flag:"🥈", season:2025 },
-  WC:  { id:1,   name:"World Cup",           country:"World",       flag:"🌍", season:2026 },
+  CL:   { id:2,   name:"Champions League",    country:"Europe",      flag:"🏆", season:2025 },
+  EL:   { id:3,   name:"Europa League",       country:"Europe",      flag:"🥈", season:2025 },
+  UECL: { id:848, name:"Conference League",   country:"Europe",      flag:"🥉", season:2025 },
+  FAC:  { id:45,  name:"FA Cup",              country:"England",     flag:"🏴󠁧󠁢󠁥󠁮󠁧󠁿", season:2024 },
+  EFL:  { id:48,  name:"EFL Cup",             country:"England",     flag:"🏴󠁧󠁢󠁥󠁮󠁧󠁿", season:2024 },
+  CDR:  { id:143, name:"Copa del Rey",        country:"Spain",       flag:"🇪🇸", season:2024 },
+  DFB:  { id:81,  name:"DFB Pokal",           country:"Germany",     flag:"🇩🇪", season:2024 },
+  CPI:  { id:137, name:"Coppa Italia",        country:"Italy",       flag:"🇮🇹", season:2024 },
+  CDF:  { id:66,  name:"Coupe de France",     country:"France",      flag:"🇫🇷", season:2024 },
+  CLW:  { id:15,  name:"Club World Cup",      country:"World",       flag:"🌍", season:2025 },
+  WC:   { id:1,   name:"World Cup",           country:"World",       flag:"🌍", season:2026 },
 };
 
 const memPredictions = [], memSubs = [];
