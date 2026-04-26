@@ -1033,7 +1033,7 @@ app.get("/parlays", async (req, res) => {
       highRisk: buildSlip(riskPicks, "High Risk Parlay", "💣", "risk"),
       generatedAt: new Date().toISOString()
     };
-    setCache("parlays", result, 3*60*60*1000);
+    setCache("parlays", result, 13*60*60*1000);
     res.json(result);
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -1364,6 +1364,9 @@ app.get("/cron/daily", async (req, res) => {
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
   // Respond immediately — run tasks in background to avoid timeout
   res.json({ success:true, timestamp:new Date().toISOString(), message:"Tasks running in background..." });
+  // Clear parlay cache so it rebuilds fresh with today's fixtures
+  cache.delete("parlays");
+  console.log("Parlay cache cleared — will rebuild on next /parlays request");
   try { await autoBlog(); } catch(e) { console.error("Cron blog error:", e.message); }
   try { await resolvePredictions(); } catch(e) { console.error("Cron resolve error:", e.message); }
   // Post results to Telegram after resolution
