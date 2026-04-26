@@ -114,8 +114,9 @@ async function postResultsToTelegram() {
     const { data } = await supabase.from("predictions")
       .select("*")
       .eq("parlay_type", "safe")
-      .gte("date", yesterday)
-      .not("status", "eq", "pending");
+      .gte("created_at", yesterday)
+      .not("status", "eq", "pending")
+      .order("created_at", { ascending: false });
 
     if (!data || !data.length) return;
 
@@ -835,21 +836,20 @@ app.get("/performance", async (req, res) => {
         bySport[sp].total++;
         if (p.status==="won") bySport[sp].won++;
       });
-      // Only use parlay picks for performance (AI-selected, not user clicks)
-      const parlayPreds = preds.filter(p => p.parlay_type);
+      // Only use SAFE parlay picks for performance tracking
+      const parlayPreds = preds.filter(p => p.parlay_type === "safe");
       const parlayResolved = parlayPreds.filter(p => p.status !== "pending");
       const parlayWon = parlayResolved.filter(p => p.status === "won");
 
-      // Breakdown by parlay type
-      const byParlayType = { safe:{won:0,total:0}, value:{won:0,total:0}, risk:{won:0,total:0} };
-      parlayResolved.forEach(p => {
-        const t = p.parlay_type || "value";
-        if (!byParlayType[t]) byParlayType[t] = {won:0,total:0};
-        byParlayType[t].total++;
-        if (p.status==="won") byParlayType[t].won++;
-      });
+      // Only safe parlay type shown
+      const byParlayType = [{
+        type: "safe",
+        won: parlayWon.length,
+        total: parlayResolved.length,
+        accuracy: parlayResolved.length ? Math.round(parlayWon.length/parlayResolved.length*100) : null
+      }];
 
-      // By league (parlay picks only)
+      // By league - safe picks only
       const byLeagueParlays = {};
       parlayResolved.forEach(p => {
         const lg = p.comp_id||"unknown";
