@@ -955,7 +955,7 @@ app.get("/parlays", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
     const allFx = [];
-    for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","CL","EL"]) {
+    for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","ELC","SPL","BEL","TUR","GRE","SAU","MLS","CL","EL","UECL","FAC","CDR","DFB","CPI","CDF","CLW"]) {
       try {
         const lg = LEAGUES[id];
         // TODAY only - no future dates
@@ -1021,9 +1021,11 @@ app.get("/parlays", async (req, res) => {
       return { label, emoji, riskColor: parlayType==="safe"?"#16a34a":parlayType==="value"?"#d97706":"#dc2626", picks:mappedPicks, totalOdds, combinedConf };
     };
 
-    const safePicks = valid.filter(p=>p.prediction.result_confidence>=70).slice(0,3);
-    const valuePicks = valid.slice(0,5);
-    const riskPicks = valid.slice(0,7);
+    // Only picks 60%+ confidence allowed in any parlay
+    const qualified = valid.filter(p=>p.prediction.result_confidence>=60);
+    const safePicks = qualified.filter(p=>p.prediction.result_confidence>=70).slice(0,3);
+    const valuePicks = qualified.slice(0,5);
+    const riskPicks = qualified.slice(0,7);
 
     const result = {
       safe: buildSlip(safePicks, "Safe Parlay", "🔒", "safe"),
@@ -1396,7 +1398,7 @@ app.get("/telegram/parlay", async (req, res) => {
       // Build parlays fresh
       const today = new Date().toISOString().split("T")[0];
       const allFx = [];
-      for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","CL","EL"]) {
+      for (const id of ["PL","PD","BL1","SA","FL1","DED","PPL","ELC","SPL","BEL","TUR","GRE","SAU","MLS","CL","EL","UECL","FAC","CDR","DFB","CPI","CDF","CLW"]) {
         try {
           const lg = LEAGUES[id];
           const data = await afGet("/fixtures?league=" + lg.id + "&season=" + lg.season + "&date=" + today + "&status=NS-PST-1H-2H-HT");
@@ -1410,8 +1412,8 @@ app.get("/telegram/parlay", async (req, res) => {
       const preds = await Promise.all(allFx.slice(0,8).map(async f => {
         try { return { ...f, prediction: await predictFootball(f.home, f.away, f.compId) }; } catch { return null; }
       }));
-      const valid = preds.filter(p=>p&&p.prediction&&!p.prediction.error).sort((a,b)=>b.prediction.result_confidence-a.prediction.result_confidence);
-      if (!valid.length) { await sendTelegram("⚠️ ScoutAI: Could not generate predictions right now."); return; }
+      const valid = preds.filter(p=>p&&p.prediction&&!p.prediction.error&&p.prediction.result_confidence>=60).sort((a,b)=>b.prediction.result_confidence-a.prediction.result_confidence);
+      if (!valid.length) { await sendTelegram("⚠️ ScoutAI: Not enough high-confidence predictions today."); return; }
       const buildSlip = (picks, label, emoji) => ({
         label, emoji,
         picks: picks.map(p=>({ home:p.home, away:p.away, flag:p.flag, compName:p.compName, result:p.prediction.result, confidence:p.prediction.result_confidence, score:p.prediction.score, odds:parseFloat((100/p.prediction.result_confidence).toFixed(2)) })),
