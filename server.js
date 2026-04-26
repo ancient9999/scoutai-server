@@ -235,6 +235,147 @@ const LEAGUES = {
 const memPredictions = [], memSubs = [];
 let predictionStreak = { current: 0, best: 0, lastResult: null };
 
+// ── TWITTER/X AUTOMATION ────────────────────────────────────────────────────
+const TWITTER_API_KEY = process.env.TWITTER_API_KEY;
+const TWITTER_API_SECRET = process.env.TWITTER_API_SECRET;
+const TWITTER_ACCESS_TOKEN = process.env.TWITTER_ACCESS_TOKEN;
+const TWITTER_ACCESS_SECRET = process.env.TWITTER_ACCESS_SECRET;
+
+function generateOAuthHeader(method, url, params) {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
+  
+  const oauthParams = {
+    oauth_consumer_key: TWITTER_API_KEY,
+    oauth_nonce: nonce,
+    oauth_signature_method: "HMAC-SHA1",
+    oauth_timestamp: timestamp,
+    oauth_token: TWITTER_ACCESS_TOKEN,
+    oauth_version: "1.0"
+  };
+  
+  const allParams = { ...params, ...oauthParams };
+  const sortedParams = Object.keys(allParams).sort().map(k => 
+    `${encodeURIComponent(k)}=${encodeURIComponent(allParams[k])}`
+  ).join("&");
+  
+  const sigBase = `${method}&${encodeURIComponent(url)}&${encodeURIComponent(sortedParams)}`;
+  const sigKey = `${encodeURIComponent(TWITTER_API_SECRET)}&${encodeURIComponent(TWITTER_ACCESS_SECRET)}`;
+  
+  const crypto = require("crypto");
+  const signature = crypto.createHmac("sha1", sigKey).update(sigBase).digest("base64");
+  
+  oauthParams.oauth_signature = signature;
+  
+  return "OAuth " + Object.keys(oauthParams).sort().map(k =>
+    `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`
+  ).join(", ");
+}
+
+async function postTweet(text) {
+  if (!TWITTER_API_KEY || !TWITTER_API_SECRET || !TWITTER_ACCESS_TOKEN || !TWITTER_ACCESS_SECRET) {
+    console.log("Twitter credentials not configured - skipping tweet");
+    return;
+  }
+  try {
+    const url = "https://api.twitter.com/2/tweets";
+    const body = JSON.stringify({ text });
+    const authHeader = generateOAuthHeader("POST", url, {});
+    
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": authHeader,
+        "Content-Type": "application/json"
+      },
+      body,
+      signal: AbortSignal.timeout(15000)
+    });
+    const d = await r.json();
+    if (d.errors) console.error("Twitter error:", JSON.stringify(d.errors));
+    else console.log("Tweet posted:", d.data?.id);
+    return d;
+  } catch(e) { console.error("Tweet error:", e.message); }
+}
+
+async function postDailyParlayToTwitter(parlays) {
+  if (!parlays?.safe?.picks?.length) return;
+  const today = new Date().toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" });
+  const avgConf = picks => Math.round(picks.reduce((a,p)=>a+p.confidence,0)/picks.length);
+
+  let tweet = `🤖 ScoutAI Daily Parlay — ${today}
+
+`;
+  tweet += `🔒 SAFE PARLAY (${avgConf(parlays.safe.picks)}% avg confidence)
+`;
+  tweet += `💰 Odds: ${parlays.safe.totalOdds}x
+
+`;
+
+  parlays.safe.picks.forEach(p => {
+    const icon = p.market==="over25"?"⚽":p.market==="btts"?"🎯":"🏆";
+    tweet += `${p.flag||"⚽"} ${p.home} vs ${p.away}
+`;
+    tweet += `${icon} ${p.result} (${p.confidence}%)
+
+`;
+  });
+
+  tweet += `Full analysis 👉 scoutaibot.com/parlays
+
+`;
+  tweet += `#FootballPredictions #BettingTips #Sportybet #Bet9ja`;
+
+  // Twitter has 280 char limit - trim if needed
+  if (tweet.length > 280) {
+    tweet = tweet.substring(0, 277) + "...";
+  }
+
+  await postTweet(tweet);
+}
+
+async function postResultsToTwitter() {
+  if (!SUPABASE_ENABLED) return;
+  try {
+    const yesterday = new Date(Date.now() - 24*60*60*1000).toISOString().split("T")[0];
+    const { data } = await supabase.from("predictions")
+      .select("*")
+      .eq("parlay_type", "safe")
+      .gte("created_at", yesterday)
+      .not("status", "eq", "pending")
+      .order("created_at", { ascending: false });
+
+    if (!data || !data.length) return;
+
+    const won = data.filter(p => p.status === "won");
+    const lost = data.filter(p => p.status === "lost");
+    const accuracy = Math.round(won.length / data.length * 100);
+
+    let tweet = `📊 ScoutAI Yesterday's Results
+
+`;
+    tweet += `✅ ${won.length} Correct | ❌ ${lost.length} Wrong
+`;
+    tweet += `🎯 Accuracy: ${accuracy}%
+
+`;
+
+    data.slice(0,4).forEach(p => {
+      const icon = p.status === "won" ? "✅" : "❌";
+      tweet += `${icon} ${p.home} vs ${p.away}: ${p.result}
+`;
+    });
+
+    tweet += `
+More predictions 👉 scoutaibot.com
+`;
+    tweet += `#ScoutAI #FootballPredictions`;
+
+    if (tweet.length > 280) tweet = tweet.substring(0, 277) + "...";
+    await postTweet(tweet);
+  } catch(e) { console.error("Twitter results error:", e.message); }
+}
+
 // ── API-FOOTBALL CALL ──────────────────────────────────────────────────────
 async function afGet(path) {
   const cached = getCache("af_" + path);
@@ -793,7 +934,7 @@ async function predictSport(home, away, sport, league) {
   return await callClaude(sys, "Predict: " + home + " vs " + away + (league ? " (" + league + ")" : ""), 600);
 }
 
-app.post("/predict", async (req, res) => {
+app.post("/predict", rateLimit(10, 60*60*1000), async (req, res) => {
   const { home, away, homeId, awayId, compId, sport } = req.body;
   if (!home || !away) return res.status(400).json({ error:"Teams required" });
   try {
@@ -949,7 +1090,7 @@ async function storeParlayPick(pick, parlayType, fixtureId) {
   } catch(e) { console.error("storeParlayPick exception:", e.message); }
 }
 
-app.get("/parlays", async (req, res) => {
+app.get("/parlays", rateLimit(10, 60*60*1000), async (req, res) => {
   const cached = getCache("parlays");
   if (cached) return res.json(cached);
   try {
@@ -1227,7 +1368,7 @@ app.post("/contact", async (req, res) => {
 });
 
 // ── NEWSLETTER ─────────────────────────────────────────────────────────────
-app.post("/subscribe", async (req, res) => {
+app.post("/subscribe", rateLimit(5, 60*60*1000), async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error:"Email required" });
   try {
@@ -1371,6 +1512,7 @@ app.get("/cron/daily", async (req, res) => {
   try { await resolvePredictions(); } catch(e) { console.error("Cron resolve error:", e.message); }
   // Post results to Telegram after resolution
   try { await postResultsToTelegram(); } catch(e) { console.error("Telegram results error:", e.message); }
+  try { await postResultsToTwitter(); } catch(e) { console.error("Twitter results error:", e.message); }
   console.log("Cron daily complete:", new Date().toISOString());
 });
 
@@ -1384,6 +1526,31 @@ app.get("/telegram/test", async (req, res) => {
     await sendTelegram("🤖 <b>ScoutAI Bot is live!</b>\n\nDaily parlays and predictions will be posted here every morning.\n\n👉 <a href=\"https://scoutaibot.com\">scoutaibot.com</a>");
     res.json({ success:true, message:"Test message sent to Telegram" });
   } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// Manual Twitter test
+app.get("/twitter/test", async (req, res) => {
+  const secret = req.query.secret;
+  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
+  try {
+    await postTweet("🤖 ScoutAI Bot is live! Daily football predictions and parlays.\n\n👉 scoutaibot.com\n\n#FootballPredictions #BettingTips");
+    res.json({ success:true, message:"Test tweet posted to @scoutaibot" });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// Manual parlay post to Twitter
+app.get("/twitter/parlay", async (req, res) => {
+  const secret = req.query.secret;
+  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return res.status(401).json({ error:"Unauthorized" });
+  res.json({ success:true, message:"Posting parlay to Twitter..." });
+  try {
+    const cached = getCache("parlays");
+    if (cached && (cached.safe || cached.medium)) {
+      await postDailyParlayToTwitter(cached);
+    } else {
+      await postTweet("⚽ Today\'s AI predictions are ready!\n\n👉 scoutaibot.com/parlays\n\n#FootballPredictions");
+    }
+  } catch(e) { console.error("Manual Twitter parlay error:", e.message); }
 });
 
 // Manual parlay post to Telegram
@@ -1462,6 +1629,8 @@ setInterval(async () => {
       if (parlayData && parlayData.safe) {
         await postDailyParlayToTelegram(parlayData);
         console.log("Telegram parlay posted");
+      // Also post to Twitter/X
+      try { await postDailyParlayToTwitter(parlayData); console.log("Twitter parlay posted"); } catch(e) { console.error("Twitter parlay error:", e.message); }
       }
     } catch(e) { console.error("Telegram parlay error:", e.message); }
   }
