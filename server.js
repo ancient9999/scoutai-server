@@ -6,6 +6,37 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(cors());
+// ── RATE LIMITING ────────────────────────────────────────────────────────
+const rateLimitMap = new Map();
+
+function rateLimit(maxRequests, windowMs) {
+  return (req, res, next) => {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.connection.remoteAddress || 'unknown';
+    const key = ip + ':' + req.path;
+    const now = Date.now();
+    if (!rateLimitMap.has(key)) {
+      rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    const limit = rateLimitMap.get(key);
+    if (now > limit.resetAt) {
+      rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    if (limit.count >= maxRequests) {
+      return res.status(429).json({ error: "Too many requests. Please slow down.", retryAfter: Math.ceil((limit.resetAt - now) / 1000) + " seconds" });
+    }
+    limit.count++;
+    next();
+  };
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of rateLimitMap.entries()) {
+    if (now > val.resetAt) rateLimitMap.delete(key);
+  }
+}, 10 * 60 * 1000);
 app.use(express.json());
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -793,7 +824,7 @@ async function predictSport(home, away, sport, league) {
   return await callClaude(sys, "Predict: " + home + " vs " + away + (league ? " (" + league + ")" : ""), 600);
 }
 
-app.post("/predict", async (req, res) => {
+app.post("/predict", rateLimit(10, 60*60*1000),
   const { home, away, homeId, awayId, compId, sport } = req.body;
   if (!home || !away) return res.status(400).json({ error:"Teams required" });
   try {
